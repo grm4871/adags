@@ -20,7 +20,9 @@ From the repo you can also run `bin/adags`. Do not run `./adags` — that is the
 
 ## Cost
 
-Default is the **Hermes CLI → Nous Portal**, model `nvidia/nemotron-3-super-120b-a12b`. That spends the Portal credit you already bought. ADAGS does **not** inherit `~/.hermes/config.yaml` (yours still says DeepSeek).
+Default is the **Hermes CLI → Nous Portal**, model `nvidia/nemotron-3-super-120b-a12b`. Citizens and the motion clerk stay on that model. Every four turns a separate **Luna** call (`gpt-5.6-luna` via `codex exec`) writes a fact brief onto the next citizen card. That is not a vote and not a citizen. `codex` on PATH is enough; `ADAGS_BRIEF_EVERY=0` turns it off.
+
+ADAGS does **not** inherit `~/.hermes/config.yaml` (yours still says DeepSeek).
 
 ```bash
 hermes portal    # once
@@ -29,7 +31,7 @@ python -m adags run --turns 2 --turn-cap 18 --max-seconds 120
 
 OpenRouter free remains `--provider openrouter` if you want the `:free` slug instead.
 
-Spend cap defaults to **$1** (Hermes meter stays $0; Nous bills the Portal). Each call times out at 45s. Raw replies land in `run/raw/`.
+Spend cap defaults to **$1** (Hermes meter stays $0; Nous bills the Portal; Luna bills your Codex account). Each citizen call times out at 45s. Raw replies land in `run/raw/`.
 
 ## Operator harness
 

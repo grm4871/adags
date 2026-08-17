@@ -114,7 +114,7 @@ Goals are synthetic by default. A run can start with no mission. The operator *m
 
 ## Pieces
 
-Cheap stack: Python CLI, markdown + JSON state. **Default runtime is Hermes** (`hermes proxy` → Nous Portal) with model `nvidia/nemotron-3-super-120b-a12b`, billed to the Portal subscription. Same model for every citizen and for the clerk. Prompts send 200-series only. Raw replies are written to `run/raw/`.
+Cheap stack: Python CLI, markdown + JSON state. **Default runtime is Hermes** (`hermes proxy` → Nous Portal) with model `nvidia/nemotron-3-super-120b-a12b`, billed to the Portal subscription. Same model for every citizen and for the motion clerk. Every four turns `codex exec -m gpt-5.6-luna` writes a read-only clerk brief (host facts only; no vote). Prompts send 200-series only. Raw replies are written to `run/raw/`.
 
 No web UI, no database, no agent framework.
 
