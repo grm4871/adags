@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Launch the ADAGS operator harness without activating a venv.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+if command -v readlink >/dev/null 2>&1; then
+  src="$(readlink -f "$src" 2>/dev/null || readlink "$src")"
+fi
+root="$(cd "$(dirname "$src")/.." && pwd)"
+export ADAGS_RUN_DIR="${ADAGS_RUN_DIR:-$root/run}"
+if [[ -x "$root/.venv/bin/python" ]]; then
+  exec "$root/.venv/bin/python" -m adags "$@"
+fi
+if command -v python3 >/dev/null 2>&1; then
+  PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m adags "$@"
+fi
+echo "adags: need $root/.venv (python3 -m venv .venv && .venv/bin/pip install -e .) or python3 on PATH" >&2
+exit 127

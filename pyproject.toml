@@ -1,0 +1,24 @@
+[project]
+name = "adags"
+version = "0.1.0"
+description = "Agentic Democratic Autonomous Goal System"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+adags = "adags.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["adags*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
