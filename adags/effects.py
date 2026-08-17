@@ -51,13 +51,24 @@ def normalize_effect(effect: Any) -> dict | None:
     if not isinstance(effect, dict):
         return None
     if effect.get("type") in LEGISLATIVE_OK:
-        return effect
+        out = dict(effect)
+        if out["type"] == "amend_rule":
+            if not out.get("id") and out.get("rule_id") is not None:
+                out["id"] = str(out["rule_id"])
+            if not out.get("text") and out.get("new_text") is not None:
+                out["text"] = str(out["new_text"])
+        return out
     nested = [k for k in effect if k in LEGISLATIVE_OK]
     if len(nested) == 1:
         kind = nested[0]
         body = effect[kind]
         if isinstance(body, dict):
             out = {"type": kind, **body}
+            if kind == "amend_rule":
+                if not out.get("id") and out.get("rule_id") is not None:
+                    out["id"] = str(out["rule_id"])
+                if not out.get("text") and out.get("new_text") is not None:
+                    out["text"] = str(out["new_text"])
             if kind == "write_workspace":
                 out.setdefault("path", "design-log.md")
                 if not str(out.get("content") or "").strip():

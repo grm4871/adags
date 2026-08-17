@@ -25,6 +25,7 @@ If speech nominates, votes, or proposes, the matching field must be filled. Talk
 - If none is open and you want a law: propose with effects. Do not only describe it.
 - executive: President only. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact. Voting a membership bill is not using office.
 - Motions may use: amend_rule (200+ with text and a validated mechanics object), repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op. set_goal and write_workspace are floor effects only if current law does not reserve them as presidential privileges.
+- Exact amendment shape: {{"type":"amend_rule","id":"213","text":"Motions require two thirds.","mechanics":{{"motion.threshold":"two_thirds"}}}}. mechanics contains published paths directly; never put amend_rule inside mechanics.
 - Executable amendment mechanics are shown in the constitution. Unsupported mechanics and prose-only amendments are nonbinding.
 - If the host lacks a mechanic you want, use suggest_host_change with title and text. It enters the operator's suggestion box and never changes law by itself.
 - Do not propose add_member while goals are none. Impeach a President who leaves goals empty.

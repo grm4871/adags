@@ -167,6 +167,44 @@ def test_amending_motion_threshold_changes_host_behavior(tmp_path):
     assert json.loads(closed.read_text())["passed"] is False
 
 
+def test_checkpointed_turn_resumes_after_completed_citizen(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=3, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "continuity", 2))
+    state.write_goals({"g1": "Already enacted."})
+    control = state.control()
+    control["turn"] = 3
+    state.write_control(control)
+    state.dump_json(
+        "turn_progress.json",
+        {
+            "turn": 3,
+            "completed": ["continuity"],
+            "speeches": ["**continuity:** Already acted."],
+            "impeach_votes": [],
+            "exec_notes": ["set goal g1"],
+        },
+    )
+    scripts = []
+    for mid in ["ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": f"{mid} attends.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    llm = ScriptedLLM(scripts=scripts)
+    run_turn(state, llm)
+    assert llm.i == 4
+    assert state.control()["turn"] == 4
+    assert not state.path("turn_progress.json").exists()
+    assert state.path("journal.md").read_text().count("**continuity:** Already acted.") == 1
+
+
 def test_plurality_helper():
     assert (
         plurality_winner(
@@ -353,3 +391,30 @@ def test_membership_is_governed_by_law_not_goal_heuristics(tmp_path):
     ids = [m["id"] for m in state.members()]
     assert "herald" in ids
     assert not (state.root / "motions" / "open.json").exists()
+
+
+def test_keyed_proposal_shape_opens_motion(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=2, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "continuity", 1))
+    state.write_goals({"g1": "Keep testing."})
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": f"{mid} attends.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": (
+                    {"add_member": {"id": "minority", "values": "Protect minority interests."}}
+                    if mid == "builder" else None
+                ),
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    motion = json.loads((state.root / "motions" / "open.json").read_text())
+    assert motion["effects"] == [
+        {"type": "add_member", "id": "minority", "values": "Protect minority interests."}
+    ]

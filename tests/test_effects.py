@@ -97,6 +97,12 @@ def test_normalize_nested_amend_rule(tmp_path):
     assert r["ok"]
     assert value(r["law"], "election.term_length") == 8
 
+    aliased = normalize_effect(
+        {"amend_rule": {"rule_id": 213, "new_text": "Require unanimity.", "mechanics": {"motion.threshold": "unanimous"}}}
+    )
+    assert aliased["id"] == "213"
+    assert aliased["text"] == "Require unanimity."
+
 
 def test_amend_rejects_non_numeric_rule_id(tmp_path):
     r, _ = _apply(

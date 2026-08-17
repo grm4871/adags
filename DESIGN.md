@@ -168,6 +168,8 @@ The clerk can draft the wrong effects. The host validates them and the operator 
 
 Citizen speech never becomes an act by regex. During a nomination, ballot, open-motion vote, or empty-goal presidency, a missing required JSON field triggers one targeted repair call. If the repair still omits the field, the act remains absent.
 
+Streaming calls have an interrupting watchdog, not merely an event-loop timestamp check. Each completed citizen is checkpointed in `turn_progress.json`; interruption or a wall-clock stop resumes with the next citizen instead of replaying already-applied acts.
+
 ### Effect whitelist (v0)
 
 The host will only ever execute:

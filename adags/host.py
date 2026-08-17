@@ -196,6 +196,26 @@ def _format_election_votes(votes: dict[str, str]) -> str:
     return ", ".join(f"{who}→{pick}" for who, pick in votes.items())
 
 
+def _load_turn_progress(state: RunState, turn: int) -> dict:
+    path = state.root / "turn_progress.json"
+    if not path.exists():
+        return {"turn": turn, "completed": [], "speeches": [], "impeach_votes": [], "exec_notes": []}
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if data.get("turn") != turn:
+        return {"turn": turn, "completed": [], "speeches": [], "impeach_votes": [], "exec_notes": []}
+    return data
+
+
+def _write_turn_progress(state: RunState, progress: dict) -> None:
+    state.dump_json("turn_progress.json", progress)
+
+
+def _clear_turn_progress(state: RunState) -> None:
+    path = state.root / "turn_progress.json"
+    if path.exists():
+        path.unlink()
+
+
 def _enact_motion(state: RunState, llm: LLM, control: dict, motion: dict, votes: dict) -> list[str]:
     """Apply structured effects; if none take, let the clerk compile the text."""
     notes: list[str] = []
@@ -283,15 +303,20 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     digest = state.last_digest()
     petitions = state.petitions()
 
-    speeches: list[str] = []
-    impeach_votes: list[str] = []
-    exec_notes: list[str] = []
+    progress = _load_turn_progress(state, turn)
+    speeches: list[str] = list(progress.get("speeches") or [])
+    impeach_votes: list[str] = list(progress.get("impeach_votes") or [])
+    exec_notes: list[str] = list(progress.get("exec_notes") or [])
+    completed = set(progress.get("completed") or [])
+    interrupted = False
     n_members = len(members)
     turn_open(turn=turn, gov=gov, n_members=n_members, motion=motion, members=members)
 
     for member in members:
+        if member["id"] in completed:
+            continue
         if deadline is not None and time.monotonic() >= deadline:
-            speeches.append("- wall-clock deadline reached; remaining citizens deferred")
+            interrupted = True
             break
         llm.deadline = deadline
         llm.remaining_usd = max(
@@ -394,8 +419,10 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
 
         if motion is None:
             prop = act.get("propose")
-            if isinstance(prop, dict) and (prop.get("title") or prop.get("text") or prop.get("effects")):
-                effects = propose_effects(prop)
+            effects = propose_effects(prop)
+            if isinstance(prop, dict) and (
+                prop.get("title") or prop.get("text") or prop.get("effects") or effects
+            ):
                 if not effects:
                     effects = list(prop.get("effects") or [])
                 title = str(prop.get("title") or "").strip()
@@ -456,8 +483,22 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 constitution = state.constitution()
                 goals = state.goals()
 
+        completed.add(member["id"])
+        progress.update(
+            {
+                "completed": sorted(completed),
+                "speeches": speeches,
+                "impeach_votes": impeach_votes,
+                "exec_notes": exec_notes,
+            }
+        )
+        _write_turn_progress(state, progress)
         if not _budget_ok(control):
+            interrupted = True
             break
+
+    if interrupted:
+        return f"turn {turn} checkpointed after {len(completed)}/{len(members)} citizens"
 
     # Impeach
     n = len(state.members())
@@ -536,6 +577,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     if control["turn"] > int(control["turn_cap"]) or float(control["usd_spent"]) >= float(control["usd_cap"]):
         control["paused"] = True
     state.write_control(control)
+    _clear_turn_progress(state)
     turn_close(
         turn=turn,
         gov=state.gov(),

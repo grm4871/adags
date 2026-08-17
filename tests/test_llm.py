@@ -88,6 +88,42 @@ def test_call_is_refused_after_wall_clock_deadline():
     assert result.error == "wall-clock deadline reached"
 
 
+def test_blocked_stream_is_interrupted_and_partial_output_survives():
+    from types import SimpleNamespace
+
+    from adags.llm import ChatLLM
+
+    class StalledStream:
+        def __iter__(self):
+            yield SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(delta=SimpleNamespace(content='{"speech":"hi', reasoning="", reasoning_content=None, model_extra={}))],
+            )
+            time.sleep(1)
+
+    class Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return StalledStream()
+
+    llm = ChatLLM.__new__(ChatLLM)
+    llm.model = "free"
+    llm.json_mode = False
+    llm.timeout = 0.03
+    llm.deadline = None
+    llm.remaining_usd = None
+    llm._in_rate = 0
+    llm._out_rate = 0
+    llm.client = Client()
+    started = time.monotonic()
+    result = llm.complete(system="s", user="u")
+    assert time.monotonic() - started < 0.5
+    assert result.error == "timeout after 0s"
+    assert result.text.endswith('{"speech":"hi')
+
+
 def test_delta_parts_does_not_double_identical_streams():
     from types import SimpleNamespace
 

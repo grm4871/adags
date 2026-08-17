@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -131,10 +134,12 @@ class ChatLLM(LLM):
             # attempt is the only way to keep the local cap meaningful.
             attempts = attempts[:1]
         last_exc: Exception | None = None
+        completion_deadline = min(
+            time.monotonic() + self.timeout,
+            self.deadline if self.deadline is not None else float("inf"),
+        )
         for msgs, pre in attempts:
-            timeout = self.timeout
-            if self.deadline is not None:
-                timeout = min(timeout, self.deadline - time.monotonic())
+            timeout = completion_deadline - time.monotonic()
             if timeout <= 0:
                 return LLMResult(text="", error="wall-clock deadline reached")
             max_tokens = int(os.environ.get("ADAGS_MAX_TOKENS", "1200"))
@@ -164,15 +169,21 @@ class ChatLLM(LLM):
                 kwargs["response_format"] = {"type": "json_object"}
             hook = _seeded_on_token(on_token, pre)
             try:
-                result = self._complete_stream(kwargs, hook, on_think)
+                result = self._complete_stream(
+                    kwargs, hook, on_think, deadline=completion_deadline
+                )
                 result.text = apply_prefix(pre, result.text)
                 return result
             except Exception as exc:
                 last_exc = exc
+                if isinstance(exc, TimeoutError) or time.monotonic() >= completion_deadline:
+                    break
                 if self.json_mode and not budgeted:
                     kwargs.pop("response_format", None)
                     try:
-                        result = self._complete_stream(kwargs, hook, on_think)
+                        result = self._complete_stream(
+                            kwargs, hook, on_think, deadline=completion_deadline
+                        )
                         result.text = apply_prefix(pre, result.text)
                         return result
                     except Exception as exc2:
@@ -187,52 +198,55 @@ class ChatLLM(LLM):
             error=f"{type(last_exc).__name__}: {last_exc}"[:200] if last_exc else "empty",
         )
 
-    def _complete_stream(self, kwargs: dict[str, Any], on_token, on_think=None) -> LLMResult:
+    def _complete_stream(
+        self, kwargs: dict[str, Any], on_token, on_think=None, *, deadline: float | None = None
+    ) -> LLMResult:
         content_parts: list[str] = []
         think_parts: list[str] = []
         inn = out = 0
-        deadline = min(
+        deadline = deadline or min(
             time.monotonic() + self.timeout,
             self.deadline if self.deadline is not None else float("inf"),
         )
         try:
-            stream = self.client.chat.completions.create(
-                **kwargs,
-                stream=True,
-                stream_options={"include_usage": True},
+            with _interrupt_at(deadline):
+                try:
+                    stream = self.client.chat.completions.create(
+                        **kwargs,
+                        stream=True,
+                        stream_options={"include_usage": True},
+                    )
+                except TypeError:
+                    stream = self.client.chat.completions.create(**kwargs, stream=True)
+                for event in stream:
+                    usage = getattr(event, "usage", None)
+                    if usage:
+                        inn = int(getattr(usage, "prompt_tokens", 0) or 0)
+                        out = int(getattr(usage, "completion_tokens", 0) or 0)
+                    if not event.choices:
+                        continue
+                    content, think = _delta_parts(event.choices[0].delta)
+                    if think:
+                        think_parts.append(think)
+                    if content:
+                        content_parts.append(content)
+                    if think and content and think == content:
+                        if on_token:
+                            on_token(content)
+                    else:
+                        if think and on_think:
+                            on_think(think)
+                        if content and on_token:
+                            on_token(content)
+        except TimeoutError:
+            return LLMResult(
+                text="".join(content_parts) or "".join(think_parts),
+                input_tokens=inn,
+                output_tokens=out,
+                input_rate=self._in_rate,
+                output_rate=self._out_rate,
+                error=f"timeout after {self.timeout:.0f}s",
             )
-        except Exception:
-            stream = self.client.chat.completions.create(**kwargs, stream=True)
-        for event in stream:
-            if time.monotonic() > deadline:
-                text = "".join(content_parts) or "".join(think_parts)
-                return LLMResult(
-                    text=text,
-                    input_tokens=inn,
-                    output_tokens=out,
-                    input_rate=self._in_rate,
-                    output_rate=self._out_rate,
-                    error=f"timeout after {self.timeout:.0f}s",
-                )
-            usage = getattr(event, "usage", None)
-            if usage:
-                inn = int(getattr(usage, "prompt_tokens", 0) or 0)
-                out = int(getattr(usage, "completion_tokens", 0) or 0)
-            if not event.choices:
-                continue
-            content, think = _delta_parts(event.choices[0].delta)
-            if think:
-                think_parts.append(think)
-            if content:
-                content_parts.append(content)
-            if think and content and think == content:
-                if on_token:
-                    on_token(content)
-            else:
-                if think and on_think:
-                    on_think(think)
-                if content and on_token:
-                    on_token(content)
         text = "".join(content_parts) or "".join(think_parts)
         if not text.strip():
             raise RuntimeError("empty stream")
@@ -243,6 +257,29 @@ class ChatLLM(LLM):
             input_rate=self._in_rate,
             output_rate=self._out_rate,
         )
+
+
+@contextmanager
+def _interrupt_at(deadline: float):
+    """Interrupt a blocked streaming read at an absolute monotonic deadline."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("model call deadline reached")
+    previous = signal.getsignal(signal.SIGALRM)
+
+    def expire(_signum, _frame):
+        raise TimeoutError("model stream stopped yielding before its deadline")
+
+    signal.signal(signal.SIGALRM, expire)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def _delta_parts(delta: Any) -> tuple[str, str]:
