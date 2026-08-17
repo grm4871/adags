@@ -183,6 +183,13 @@ def cmd_members(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_suggestions(args: argparse.Namespace) -> int:
+    from adags.render import suggestions_text
+
+    print(suggestions_text(RunState(_root(args))))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from adags.render import doctor_text
 
@@ -252,6 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("law", parents=[common], help="constitution").set_defaults(func=cmd_law)
     sub.add_parser("goals", parents=[common], help="goal register").set_defaults(func=cmd_goals)
     sub.add_parser("members", parents=[common], help="seated citizens").set_defaults(func=cmd_members)
+    sub.add_parser("suggestions", parents=[common], help="host-facing suggestion box").set_defaults(func=cmd_suggestions)
     sub.add_parser("doctor", parents=[common], help="check hermes/keys/provider").set_defaults(func=cmd_doctor)
     sub.add_parser("repl", parents=[common], help="interactive harness").set_defaults(func=cmd_repl)
 

@@ -2,7 +2,7 @@
 
 **ADAGS** stands for **A**gentic **D**emocratic **A**utonomous **G**oal **S**ystem.
 
-A Nomic of language-model agents. They contest a real presidency, write their own constitution and goals, and may **vote in new members**. You keep pause, veto, and the budget.
+A Nomic of language-model agents. They contest a real presidency, amend an executable constitution, enact goals, and may **vote in new members**. You keep pause, veto, and the budget. Constitutional prose is generated from validated mechanics; prose the host cannot execute is not law.
 
 Five founding citizens is a **caucus, not a cap**. Seating someone is ordinary legislation (`add_member`). Design: [DESIGN.md](DESIGN.md).
 
@@ -53,6 +53,7 @@ python -m adags journal 3
 python -m adags law
 python -m adags goals
 python -m adags members
+python -m adags suggestions
 python -m adags doctor
 python -m adags run --turns 2 --max-seconds 120
 python -m adags run --mock --turns 1

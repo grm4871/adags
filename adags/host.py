@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
 import time
 from datetime import datetime
 from typing import Any
 
 from adags.citizens import citizen_act, clerk_compile, snapshot_user
+from adags.constitution import apply_to_runtime, value
 from adags.memory import append_record, compose_user, load_records, record_from_act
 from adags.effects import (
     apply_effect,
@@ -16,7 +16,6 @@ from adags.effects import (
     coerce_effects,
     propose_effects,
     render_goals,
-    salvage_motion_effects,
 )
 from adags.gov import (
     add_nominee,
@@ -26,7 +25,6 @@ from adags.gov import (
     as_member_id,
     as_party_id,
     election_due,
-    may_execute,
     member_ids,
     passes,
     plurality_winner,
@@ -125,16 +123,17 @@ def _apply_many(
     source: str,
     act_id: str,
 ) -> list[dict]:
-    constitution = state.constitution()
+    law = state.law()
     goals = state.goals()
     members = state.members()
     gov = state.gov()
     inverses = []
     notes = []
+    applied = False
     for effect in effects:
         result, inverse = apply_effect(
             effect,
-            constitution=constitution,
+            law=law,
             goals=goals,
             members=members,
             gov=gov,
@@ -146,9 +145,12 @@ def _apply_many(
         notes.append(result.get("note", ""))
         if not result.get("ok"):
             continue
-        if "constitution" in result:
-            constitution = result["constitution"]
-            state.write_constitution(constitution)
+        applied = True
+        if "law" in result:
+            law = result["law"]
+            state.write_law(law)
+            gov = apply_to_runtime(gov, law)
+            state.write_gov(gov)
         if "goals" in result:
             goals = result["goals"]
             state.write_goals(goals)
@@ -160,7 +162,7 @@ def _apply_many(
             state.write_gov(gov)
         if inverse:
             inverses.append(inverse)
-    if inverses:
+    if applied:
         state.append_act(
             {
                 "id": act_id,
@@ -200,10 +202,6 @@ def _enact_motion(state: RunState, llm: LLM, control: dict, motion: dict, votes:
     act_id = str(motion.get("id") or "motion")
     actor = motion.get("proposer")
     effects = [e for e in (motion.get("effects") or []) if isinstance(e, dict)]
-    if not effects:
-        effects = salvage_motion_effects(motion)
-        if effects:
-            motion["effects"] = effects
     if effects:
         notes.extend(_apply_many(state, effects, actor=actor, source="motion", act_id=act_id))
     if state.control().get("last_act_id") != act_id:
@@ -221,7 +219,7 @@ def _enact_motion(state: RunState, llm: LLM, control: dict, motion: dict, votes:
         state.write_control(control)
         notes.append(f"clerk: {compiled.get('reason')}")
         extra = [e for e in (compiled.get("effects") or []) if isinstance(e, dict)]
-        if compiled.get("enacted") and extra:
+        if compiled.get("compiled") and extra:
             notes.extend(_apply_many(state, extra, actor=actor, source="motion", act_id=act_id))
     if state.control().get("last_act_id") != act_id:
         notes.append("passed with no host effects")
@@ -232,23 +230,23 @@ def veto_last(state: RunState) -> str:
     act = state.last_act()
     if not act or act.get("vetoed"):
         return "nothing to veto"
-    constitution = state.constitution()
+    law = state.law()
     goals = state.goals()
     members = state.members()
     gov = state.gov()
     for inverse in reversed(act.get("inverses") or []):
         result = apply_inverse(
             inverse,
-            constitution=constitution,
+            law=law,
             goals=goals,
             members=members,
             gov=gov,
             workspace=state.workspace,
             turn=state.control()["turn"],
         )
-        if "constitution" in result:
-            constitution = result["constitution"]
-            state.write_constitution(constitution)
+        if "law" in result:
+            law = result["law"]
+            state.write_law(law)
         if "goals" in result:
             goals = result["goals"]
             state.write_goals(goals)
@@ -273,7 +271,8 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         return "paused (cap or flag)"
 
     turn = int(control["turn"])
-    gov = advance_phase(state.gov(), turn)
+    law = state.law()
+    gov = advance_phase(apply_to_runtime(state.gov(), law), turn)
     election_votes = _load_ballots(gov)
     gov["ballots"] = dict(election_votes)
     state.write_gov(gov)
@@ -388,40 +387,6 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 effects = propose_effects(prop)
                 if not effects:
                     effects = list(prop.get("effects") or [])
-                text_src = str(prop.get("text") or "")
-                for fx in effects:
-                    if not isinstance(fx, dict) or fx.get("type") != "add_member":
-                        continue
-                    if text_src and (
-                        not fx.get("values")
-                        or str(fx.get("values")).startswith("You were seated as ")
-                    ):
-                        grabbed = re.search(
-                            r"(?:standing\s+)?values?\s*[:\-]\s*(.+)",
-                            text_src,
-                            re.I | re.S,
-                        )
-                        if grabbed:
-                            fx["values"] = " ".join(grabbed.group(1).split())[:600]
-                if not goals:
-                    kept = []
-                    dropped_add = False
-                    for fx in effects:
-                        if isinstance(fx, dict) and (
-                            fx.get("type") == "add_member" or "add_member" in fx
-                        ):
-                            dropped_add = True
-                            continue
-                        kept.append(fx)
-                    effects = kept
-                    if dropped_add and not effects and not (
-                        str(prop.get("title") or "").strip()
-                        and "admit" not in str(prop.get("title") or "").lower()
-                    ):
-                        speeches.append(
-                            f"- membership closed until a goal exists ({member['id']})"
-                        )
-                        continue
                 title = str(prop.get("title") or "").strip()
                 if not title or title.lower() == "untitled":
                     for fx in effects:
@@ -430,11 +395,6 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                             break
                     else:
                         title = title or "untitled"
-                if not effects and title.lower().startswith("admit "):
-                    speeches.append(
-                        f"- membership closed until a goal exists ({member['id']})"
-                    )
-                    continue
                 motion = {
                     "id": f"m{turn}-{member['id']}",
                     "title": title,
@@ -464,7 +424,8 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             allowed = []
             for fx in exec_fx:
                 kind = (fx or {}).get("type")
-                if may_execute(gov, member["id"], kind, members):
+                privileges = value(state.law(), "offices.president.privileges", [])
+                if member["id"] == president_id(gov) and kind in privileges:
                     allowed.append(fx)
                 else:
                     exec_notes.append(f"{member['id']} executive {kind} dropped (no privilege)")
@@ -492,7 +453,8 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 )
                 exec_notes.extend(notes)
                 # refresh after executive
-                gov = state.gov()
+                gov = apply_to_runtime(state.gov(), state.law())
+                state.write_gov(gov)
                 members = state.members()
                 constitution = state.constitution()
                 goals = state.goals()
@@ -503,7 +465,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     # Impeach
     n = len(state.members())
     impeached = False
-    if impeach_votes and passes(len(impeach_votes), n, gov.get("impeach_threshold") or "majority"):
+    if value(state.law(), "impeachment.enabled", True) and impeach_votes and passes(len(impeach_votes), n, gov.get("impeach_threshold") or "majority"):
         gov = vacate_president(gov)
         state.write_gov(gov)
         impeached = True
@@ -512,7 +474,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     seated = None
     if gov.get("election_phase") == "ballot":
         winner = plurality_winner(election_votes, gov.get("nominees") or [])
-        quorum = threshold(gov.get("vote_rule") or "majority", n)
+        quorum = threshold(value(state.law(), "election.quorum", "majority"), n)
         if winner and len(election_votes) >= quorum:
             gov = seat_president(gov, winner, turn)
             state.write_gov(gov)
@@ -523,13 +485,14 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     if motion:
         votes = motion.get("votes") or {}
         ayes = sum(1 for v in votes.values() if v == "aye")
-        decided = set(votes) >= set(member_ids(state.members())) or ayes >= threshold(
+        decisive = value(state.law(), "motion.resolve_when", "decisive") == "decisive"
+        decided = set(votes) >= set(member_ids(state.members())) or (decisive and ayes >= threshold(
             gov.get("vote_rule") or "majority", n
-        )
+        ))
         # resolve if everyone voted, or enough ayes, or enough nays to make pass impossible
         nays = sum(1 for v in votes.values() if v == "nay")
         need = threshold(gov.get("vote_rule") or "majority", n)
-        if decided or nays > n - need:
+        if decided or (decisive and nays > n - need):
             passed = passes(ayes, n, gov.get("vote_rule") or "majority")
             if passed:
                 motion_notes.extend(

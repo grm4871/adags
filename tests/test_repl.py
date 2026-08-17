@@ -1,6 +1,7 @@
 from adags.repl import parse_line
-from adags.render import journal_tail, status_block
-from adags.state import archive_run, init_run
+from adags.render import journal_tail, status_block, suggestions_text
+from adags.state import RunState, archive_run, init_run
+from adags.seed import default_gov
 from adags.cli import main
 
 
@@ -45,3 +46,22 @@ def test_global_run_dir_before_subcommand_is_preserved(tmp_path):
     root = tmp_path / "custom"
     assert main(["--run-dir", str(root), "init"]) == 0
     assert (root / "control.json").exists()
+
+
+def test_empty_suggestion_box(tmp_path):
+    state = init_run(tmp_path / "run")
+    assert suggestions_text(state) == "(suggestion box empty)"
+
+
+def test_legacy_government_migrates_to_executable_constitution(tmp_path):
+    root = tmp_path / "legacy"
+    root.mkdir()
+    state = RunState(root)
+    gov = default_gov()
+    gov["vote_rule"] = "two_thirds"
+    gov["term_length"] = 9
+    state.write_gov(gov)
+    law = state.law()
+    assert law["rules"]["201"]["mechanics"]["motion.threshold"] == "two_thirds"
+    assert law["rules"]["208"]["mechanics"]["election.term_length"] == 9
+    assert (root / "constitution.json").exists()

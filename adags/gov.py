@@ -204,7 +204,6 @@ def advance_phase(gov: dict, turn: int) -> dict:
         g["election_phase"] = "ballot"
     return g
 
-
 def add_nominee(gov: dict, *, member: str, platform: str, nominator: str, turn: int) -> dict | str:
     g = deepcopy(gov)
     if g.get("election_phase") != "nominate":
@@ -264,53 +263,3 @@ def vacate_president(gov: dict) -> dict:
     g["nominees"] = []
     g["ballots"] = {}
     return g
-
-
-def set_param(gov: dict, key: str, value: Any) -> dict | str:
-    """Nomic knobs. Nested office privileges via 'offices.president.privileges'."""
-    g = deepcopy(gov)
-    allowed_top = {
-        "vote_rule",
-        "election_rule",
-        "term_length",
-        "impeach_threshold",
-        "election_enabled",
-        "max_members",
-    }
-    if key in allowed_top:
-        if key == "term_length":
-            try:
-                n = int(value)
-            except (TypeError, ValueError):
-                return "term_length must be an integer"
-            if n < 1 or n > 100:
-                return "term_length out of range"
-            g[key] = n
-            return g
-        if key == "max_members":
-            if value is None:
-                g[key] = None
-                return g
-            try:
-                n = int(value)
-            except (TypeError, ValueError):
-                return "max_members must be an integer or null"
-            if n < 1:
-                return "max_members must be >= 1"
-            g[key] = n
-            return g
-        if key in {"vote_rule", "election_rule", "impeach_threshold"}:
-            if value not in THRESHOLD_NAMES and value != "plurality":
-                return f"unknown rule {value}"
-            g[key] = value
-            return g
-        if key == "election_enabled":
-            g[key] = bool(value)
-            return g
-    if key == "offices.president.privileges":
-        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
-            return "privileges must be a list of strings"
-        g.setdefault("offices", {}).setdefault("president", {})
-        g["offices"]["president"]["privileges"] = list(value)
-        return g
-    return f"unknown param {key}"

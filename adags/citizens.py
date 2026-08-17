@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from adags.gov import as_member_id, election_due, party_roster, president_id, threshold
-from adags.llm import LLM, extract_json, fulfill_speech, salvage_act
+from adags.llm import LLM, extract_json, salvage_act
 
 CITIZEN_SYSTEM = """You are citizen `{member_id}` in ADAGS.
 
@@ -24,7 +24,9 @@ If speech nominates, votes, or proposes, the matching field must be filled. Talk
 - If a motion is open: vote_motion aye|nay|abstain. Do not propose another.
 - If none is open and you want a law: propose with effects. Do not only describe it.
 - executive: President only. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact. Voting a membership bill is not using office.
-- Motions may use: amend_rule (200+), repeal_rule, repeal_goal, add_member, remove_member, set_param. Not set_goal or write_workspace — those are presidential.
+- Motions may use: amend_rule (200+ with text and a validated mechanics object), repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op. Not set_goal or write_workspace — those are presidential.
+- Executable amendment mechanics are shown in the constitution. Unsupported mechanics and prose-only amendments are nonbinding.
+- If the host lacks a mechanic you want, use suggest_host_change with title and text. It enters the operator's suggestion box and never changes law by itself.
 - Do not propose add_member while goals are none. Impeach a President who leaves goals empty.
 
 - party: invent a slug and found a caucus, or join one already listed this turn. "none" leaves. null stays. We do not name parties for you.
@@ -34,8 +36,8 @@ The clerk compiles passed motions. It is not a seated officer and has no vote.
 
 CLERK_SYSTEM = """You are the clerk of ADAGS, not a citizen. Compile a passed motion into host effects.
 Reply with a single JSON object:
-{"enacted": true, "reason": "...", "effects": [{"type": "...", ...}]}
-Only use the allowed effect types. Never touch 100-199 rules. If the motion cannot be compiled, enacted=false and effects=[].
+{"compiled": true, "reason": "...", "effects": [{"type": "...", ...}]}
+The host has already decided that the vote passed. You only draft effects. Use allowed effect types, never touch 100-199 rules, and set compiled=false with effects=[] when the text has no unambiguous executable meaning.
 """
 
 
@@ -286,9 +288,6 @@ def citizen_act(
         system=system, user=user, on_token=on_token, on_think=on_think, prefix=ACT_PREFIX
     )
     data, parse_error = _parse_act(raw.text)
-    data = fulfill_speech(
-        data, member_id=member["id"], president=president, goals_empty=goals_empty
-    )
     if not _usable_act(data) and not raw.error:
         raw2 = llm.complete(
             system=system,
@@ -298,9 +297,6 @@ def citizen_act(
             prefix=ACT_PREFIX,
         )
         data2, parse2 = _parse_act(raw2.text)
-        data2 = fulfill_speech(
-            data2, member_id=member["id"], president=president, goals_empty=goals_empty
-        )
         if _usable_act(data2):
             raw = raw2
             data = data2
@@ -335,6 +331,6 @@ def clerk_compile(llm: LLM, *, constitution: str, motion: dict, votes: dict) -> 
     try:
         data = extract_json(raw.text)
     except Exception:
-        data = {"enacted": False, "reason": "clerk produced no JSON", "effects": []}
+        data = {"compiled": False, "reason": "clerk produced no JSON", "effects": []}
     data["_usage"] = {"input_tokens": raw.input_tokens, "output_tokens": raw.output_tokens, "usd": raw.usd}
     return data

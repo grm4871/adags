@@ -1,15 +1,16 @@
 from pathlib import Path
 
+from adags.constitution import default_constitution, value
 from adags.effects import apply_effect
-from adags.seed import CONSTITUTION, FOUNDING_MEMBERS, default_gov
+from adags.seed import FOUNDING_MEMBERS, default_gov
 
 
-def _apply(effect, tmp_path: Path, *, gov=None, members=None, actor="ambition", source="motion"):
+def _apply(effect, tmp_path: Path, *, law=None, gov=None, members=None, actor="ambition", source="motion"):
     gov = gov if gov is not None else default_gov()
     members = members if members is not None else list(FOUNDING_MEMBERS)
     return apply_effect(
         effect,
-        constitution=CONSTITUTION,
+        law=law or default_constitution(),
         goals={},
         members=members,
         gov=gov,
@@ -21,7 +22,7 @@ def _apply(effect, tmp_path: Path, *, gov=None, members=None, actor="ambition", 
 
 
 def test_cannot_amend_100_series(tmp_path):
-    r, inv = _apply({"type": "amend_rule", "id": "103", "text": "no veto"}, tmp_path)
+    r, inv = _apply({"type": "amend_rule", "id": "103", "text": "no veto", "mechanics": {"motion.threshold": "unanimous"}}, tmp_path)
     assert not r["ok"]
     assert inv is None
 
@@ -61,19 +62,10 @@ def test_coerce_nested_executive_shapes(tmp_path):
     kinds = {e["type"] for e in both}
     assert kinds == {"set_goal", "write_workspace"}
     assert both[1]["content"].startswith("Minute")
-    from adags.effects import propose_effects, salvage_motion_effects
+    from adags.effects import propose_effects
 
     keyed = propose_effects({"repeal_goal": "goal1", "add_member": None})
     assert keyed == [{"type": "repeal_goal", "id": "goal1"}]
-    salvaged = salvage_motion_effects(
-        {
-            "title": "repeal_goal goal1",
-            "text": "I propose repeal_goal goal1 to replace with quarterly harm audits.",
-        }
-    )
-    assert salvaged[0]["type"] == "repeal_goal"
-    assert salvaged[1]["type"] == "set_goal"
-    assert "quarterly" in salvaged[1]["text"]
     r, _ = _apply(
         {"write_workspace": {"description": "Establish a shared design log."}},
         tmp_path,
@@ -92,37 +84,45 @@ def test_normalize_nested_amend_rule(tmp_path):
         "amend_rule": {
             "id": "208",
             "text": "Term is eight turns.",
+            "mechanics": {"election.term_length": 8},
         }
     }
     assert normalize_effect(wrapped) == {
         "type": "amend_rule",
         "id": "208",
         "text": "Term is eight turns.",
+        "mechanics": {"election.term_length": 8},
     }
     r, _ = _apply(wrapped, tmp_path)
     assert r["ok"]
-    assert "Term is eight turns." in r["constitution"]
+    assert value(r["law"], "election.term_length") == 8
 
 
-def test_nested_amend_non_numeric_adds_new_rule(tmp_path):
+def test_amend_rejects_non_numeric_rule_id(tmp_path):
     r, _ = _apply(
         {
             "amend_rule": {
                 "id": "executive_privileges",
                 "text": "two thirds to expand.",
+                "mechanics": {"motion.threshold": "two_thirds"},
             }
         },
         tmp_path,
     )
-    assert r["ok"]
-    assert "two thirds to expand." in r["constitution"]
+    assert not r["ok"]
 
 
 def test_can_amend_200_series(tmp_path):
-    r, inv = _apply({"type": "amend_rule", "id": "208", "text": "Term is eight turns."}, tmp_path)
+    r, inv = _apply({"type": "amend_rule", "id": "208", "text": "Term is eight turns.", "mechanics": {"election.term_length": 8}}, tmp_path)
     assert r["ok"]
-    assert "208. Term is eight turns." in r["constitution"]
-    assert inv["type"] == "amend_rule"
+    assert value(r["law"], "election.term_length") == 8
+    assert inv["type"] == "_restore_rule"
+
+
+def test_prose_only_amendment_is_not_law(tmp_path):
+    r, inv = _apply({"type": "amend_rule", "id": "201", "text": "Unanimity."}, tmp_path)
+    assert not r["ok"]
+    assert inv is None
 
 
 def test_add_member_open(tmp_path):
@@ -142,9 +142,9 @@ def test_add_member_rejects_bad_id(tmp_path):
 
 
 def test_add_member_respects_optional_cap(tmp_path):
-    gov = default_gov()
-    gov["max_members"] = 5
-    r, _ = _apply({"type": "add_member", "id": "herald", "values": "x"}, tmp_path, gov=gov)
+    law = default_constitution()
+    law["rules"]["211"]["mechanics"]["membership.max_members"] = 5
+    r, _ = _apply({"type": "add_member", "id": "herald", "values": "x"}, tmp_path, law=law)
     assert not r["ok"]
     assert "max_members" in r["note"]
 
@@ -188,14 +188,45 @@ def test_set_goal_executive_is_president_only(tmp_path):
     assert r["goals"]["g2"] == "Floor-enacted goal."
 
 
-def test_gov_dot_max_members_and_term_syncs_rule_208(tmp_path):
-    r, _ = _apply({"type": "set_param", "key": "gov.max_members", "value": 7}, tmp_path)
-    assert r["ok"], r
-    assert r["gov"]["max_members"] == 7
-    r, _ = _apply({"type": "set_param", "key": "term_length", "value": 3}, tmp_path)
+def test_removing_executive_privilege_disables_effect(tmp_path):
+    law = default_constitution()
+    law["rules"]["207"]["mechanics"]["offices.president.privileges"] = []
+    gov = default_gov()
+    gov["offices"]["president"]["holder"] = "ambition"
+    r, _ = _apply(
+        {"type": "set_goal", "id": "g1", "text": "Must stay inert."},
+        tmp_path,
+        law=law,
+        gov=gov,
+        actor="ambition",
+        source="executive",
+    )
+    assert not r["ok"]
+
+
+def test_unsupported_mechanic_is_rejected(tmp_path):
+    r, _ = _apply({"type": "amend_rule", "id": "201", "text": "Let the clerk decide.", "mechanics": {"motion.magic": True}}, tmp_path)
+    assert not r["ok"]
+    assert "unsupported constitutional mechanic" in r["note"]
+
+
+def test_host_suggestion_is_filed_but_changes_no_law(tmp_path):
+    law = default_constitution()
+    r, inverse = _apply(
+        {
+            "type": "suggest_host_change",
+            "title": "Ranked ballots",
+            "text": "Please consider publishing a ranked-choice mechanic.",
+        },
+        tmp_path / "workspace",
+        law=law,
+    )
     assert r["ok"]
-    assert r["gov"]["term_length"] == 3
-    assert "Term is three turns" in r["constitution"]
+    files = list((tmp_path / "suggestions").glob("*.md"))
+    assert len(files) == 1
+    assert "pending host review" in files[0].read_text()
+    assert "law" not in r
+    assert inverse["type"] == "_delete_suggestion"
 
 
 def test_appoint_president_inert_while_elections_on(tmp_path):

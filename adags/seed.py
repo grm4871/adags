@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from adags.constitution import default_constitution, render
+
 MEMBER_ID_RE = r"^[a-z][a-z0-9_-]{0,31}$"
 
 DEFAULT_VALUES = (
@@ -59,33 +61,7 @@ FOUNDING_MEMBERS = [
     },
 ]
 
-CONSTITUTION = """# Constitution of the run
-
-## 100-series — immutable (host physics)
-
-101. The host enforces this series. Motions that would amend, suspend, or reinterpret it have no effect.
-102. The operator may pause the run at any time.
-103. The operator may veto any act. A veto is journaled and reverses reversible effects.
-104. The run ends or pauses when the budget or turn cap is exhausted.
-105. Only whitelisted effects execute. Other text is speech.
-106. All speech, motions, votes, clerk output, and effects are journaled.
-107. There is always at least one member.
-
-## 200-series — mutable (Nomic interior)
-
-201. A motion passes by simple majority of seated members (tie fails).
-202. Any member may propose one motion per turn, or vote on the open motion.
-203. There is at most one open motion at a time.
-204. A passed motion is compiled (structured effects, else the clerk) and sent to the host.
-205. Goals in goals.md are the polity's current objectives. A well-formed goal says what to pursue, until when, under which constraints, and what evidence would force reconsideration.
-206. Members may amend or repeal any 200-series rule, and may set_param any mechanical knob, by the procedure then in force.
-207. There is an office of President. While it exists, only the President may write_workspace and set_goal, and they may do so as executive acts without a vote.
-208. The President is seated by plurality election (earliest nomination wins a tie). Term is four turns. The incumbent remains as caretaker until a successor is seated and may run again.
-209. A majority of seated members marking impeach in one turn vacates the presidency immediately.
-210. Any member may nominate any seated member, including themselves. A nomination should include a platform.
-211. Any member may move to add_member (unique id + standing values) or remove_member. There is no numerical cap unless gov.max_members says so. A newly seated member acts on the next turn.
-212. At founding the presidency is vacant. First business is the first election; then the President should enact a goal and write toward it.
-"""
+CONSTITUTION = render(default_constitution())
 
 GOALS_EMPTY = "# Goals\n\n(none enacted)\n"
 

@@ -43,13 +43,13 @@ A second, cheaper observation is also worth logging: Niranjani, Kumar, and Tan (
 │  Nomic interior (markdown constitution)     │
 │  voting · offices · membership · goals      │
 │  norms · amendment of amendment             │
-│  fully self-modifying under current rules   │
+│  self-modifying within published mechanics │
 └─────────────────────────────────────────────┘
 ```
 
 **Hard shell** is physics. Agents may write essays about abolishing the veto. The host will not.
 
-**Interior** is Nomic. Whatever the current constitution says about proposing, debating, voting, offices, and goals is what the clerk and citizens are bound to follow — until they amend it by that same procedure.
+**Interior** is Nomic within a published executable vocabulary. `constitution.json` is canonical; `constitution.md` renders it for people and agents. The host—not the clerk—applies its mechanics. Unsupported prose may be a resolution, but it is not law.
 
 This is the safety claim: *goal control* can be synthetic; *runtime control* stays with the operator.
 
@@ -63,11 +63,11 @@ Schumpeter's claim is not “the people have a will.” It is: **elites compete 
 | The clock | After `term_length` turns a new nominate → ballot cycle starts. Incumbent stays as caretaker until a successor is seated, and may run again. |
 | The knife | A majority of `impeach` marks this turn vacates the office immediately. Next turn is an election. |
 
-The legislature (every member) still passes motions: amend/repeal rules, `set_param` on the mechanical knobs, add/remove members, repeal goals. That is Nomic. They can abolish the presidency, lengthen the term into a dictatorship, or give `add_member` to the President and pack the electorate. The host will enforce whatever `gov.json` then says, still clipped by the 100-series.
+The legislature still passes motions to amend executable rules, add/remove members, and repeal goals. That is Nomic within a published constitutional vocabulary. They can disable elections, lengthen terms, change thresholds, alter presidential privileges, or cap the electorate. The host enforces `constitution.json`, still clipped by the 100-series.
 
 Elections are **mechanical** (plurality, earliest nomination wins a tie). They are not clerk-interpreted. Campaigns are files: `workspace/platforms/<id>.md`.
 
-AgentElect (Faulkner et al. 2026) already showed elected leadership beats no-leader and fixed-leader on a commons game — but they *installed* the election. We seed it as 200-series / `gov.json` so the polity can keep, mutate, or repeal it.
+AgentElect (Faulkner et al. 2026) already showed elected leadership beats no-leader and fixed-leader on a commons game — but they *installed* the election. We seed it as executable 200-series law so the polity can keep or mutate it.
 
 ## Membership is open
 
@@ -79,7 +79,7 @@ AgentElect (Faulkner et al. 2026) already showed elected leadership beats no-lea
 
 The new member speaks, votes, runs, and impeaches on the **next** turn. `id` must be a unique slug (`^[a-z][a-z0-9_-]{0,31}$`). If `values` is omitted, they get a short default citizen prompt. `remove_member` cannot drop the last seat (rule 107).
 
-Cost is the real limiter: each extra member is another model call every turn. The USD/turn caps pause the run. `gov.json` may set `max_members` (default `null` = unlimited); they can pass `set_param` to cap or uncap themselves.
+Cost is the real limiter: each extra member is another model call every turn. The USD/turn caps pause the run. Executable membership law may set `membership.max_members` (default `null` = unlimited).
 
 Who writes a newcomer’s values is a political act. Incumbents can try to pack the electorate with friendly prompts. That is allowed. The operator vetoes the seating act if it is a packing scam they do not want. The host does not police ideology.
 
@@ -94,7 +94,7 @@ The operator is a **sovereign**, not a citizen.
 | Veto | Mark any enacted act `vetoed`. Effects roll back if still reversible; journal keeps the scar. |
 | Inject | File a petition (suggested goal or rule). The polity may adopt, rewrite, or ignore it. |
 | Budget | Hard cap on USD (or tokens) and on turns. Hitting either pauses the run. |
-| Read | Every act, vote, clerk interpretation, and tool result is a file. |
+| Read | Every act, vote, clerk draft, validation result, and tool result is a file. |
 
 The operator does not vote. Injected petitions are bills, not commands.
 
@@ -104,7 +104,7 @@ As much as the sandbox allows:
 
 - Their constitution (Nomic).
 - Their membership (add/remove agents, subject to budget).
-- Their offices (they may invent a speaker, a treasurer, a judge — names only mean something if the constitution says so).
+- Their supported offices and privileges. Requests for new office mechanics go to the suggestion box.
 - Their **goals** (the point). Goals are enacted acts, not system prompts you typed.
 - Their actions toward those goals, via a whitelist of host effects.
 
@@ -121,11 +121,13 @@ No web UI, no database, no agent framework.
 ```
 state/
   control.json          # paused, budget remaining, turn
-  constitution.md       # current interior law
-  gov.json              # mechanical interior: terms, vote rule, offices, max_members
+  constitution.json     # canonical executable interior law
+  constitution.md       # generated human-readable rendering
+  gov.json              # transient elections, ballots, and office holders
   members.json          # who exists, standing values
   goals.md              # enacted goals still in force
   petitions/            # operator injections
+  suggestions/          # nonbinding requests from the polity to the host
   motions/              # open and closed bills
   journal.md            # append-only history
   workspace/            # the only place tool effects write
@@ -147,22 +149,22 @@ A citizen turn: read snapshot → speak (short) → nominate / vote / impeach / 
 
 ### Clerk (not a citizen)
 
-One extra model call per resolution. The clerk reads the constitution, the motion, the votes, and emits a **structured interpretation**:
+One extra model call when a passed motion lacks usable structured effects. The clerk emits a **structured draft**:
 
 ```json
 {
-  "enacted": true,
-  "reason": "majority of seated members voted aye under rule 201",
+  "compiled": true,
+  "reason": "the passed motion unambiguously requests these effects",
   "effects": [
     {"type": "set_goal", "id": "g1", "text": "..."},
-    {"type": "amend_rule", "id": "214", "text": "..."}
+    {"type": "amend_rule", "id": "201", "text": "Motions require two thirds.", "mechanics": {"motion.threshold": "two_thirds"}}
   ]
 }
 ```
 
 The host accepts only effect types it implements. Unknown types are dropped and journaled as inert. A motion that cannot be compiled does not secretly do anything.
 
-The clerk can be wrong. The operator vetoes bad interpretations. Citizens can pass a motion rebuking or replacing the clerk's reading of a rule — still subject to the whitelist.
+The clerk can draft the wrong effects. The host validates them and the operator may veto applied effects. The clerk never decides what the law means or whether a vote passed.
 
 ### Effect whitelist (v0)
 
@@ -170,14 +172,13 @@ The host will only ever execute:
 
 | Effect | Meaning |
 | --- | --- |
-| `amend_rule` | Replace or add a numbered interior rule. Cannot touch 100-series. |
-| `repeal_rule` | Remove an interior rule. Cannot touch 100-series. |
+| `amend_rule` | Amend numbered interior law with text plus validated executable mechanics. Cannot touch 100-series. |
+| `repeal_rule` | Remove a non-mechanical resolution. Executable rules must be amended or disabled. |
 | `set_goal` / `repeal_goal` | Goal register. |
-| `add_member` / `remove_member` | Seat or unseat. Newcomer needs a unique slug id and (optional) values prompt. Not a hard cap. Fails if `gov.max_members` is set and full. Cannot remove the last member. |
-| `set_param` | Change a mechanical knob in `gov.json` (`term_length`, `vote_rule`, `election_enabled`, `max_members`, office privileges, …). |
+| `add_member` / `remove_member` | Seat or unseat. Newcomer needs a unique slug id and optional values prompt. Fails if `membership.max_members` is set and full. Cannot remove the last member. |
 | `appoint` | Bind an office. While `election_enabled`, appointing `president` is inert (only the election resolver seats them). |
 | `write_workspace` | Create or overwrite a file under `state/workspace/`. Seed: President-only executive. |
-| `read_workspace` | Already free; listed so motions can require a publication. |
+| `suggest_host_change` | File a nonbinding request in `suggestions/` for operator review. Never changes law or runtime behavior. |
 | `no_op` | Record a resolution with no world effect. |
 
 No shell, no network, no extra API keys, no spawning processes. v0 "action" is writing artifacts. That is enough to see whether they can form a goal and do something about it. Tools can widen later without changing the political core.
@@ -201,15 +202,15 @@ No shell, no network, no extra API keys, no spawning processes. v0 "action" is w
 - 203. There is at most one open motion at a time.
 - 204. A passed motion is compiled (structured effects, else the clerk) and sent to the host.
 - 205. Goals in `goals.md` are the polity's current objectives. A well-formed goal says what to pursue, until when, under which constraints, and what evidence would force reconsideration.
-- 206. Members may amend or repeal any 200-series rule, and may `set_param` any mechanical knob, by the procedure then in force.
+- 206. Members may amend 200-series law only with mechanics from the host's published constitutional vocabulary. Prose-only motions are nonbinding.
 - 207. There is an office of President. While it exists, only the President may `write_workspace` and `set_goal`, and they may do so as executive acts without a vote.
 - 208. The President is seated by plurality election (earliest nomination wins a tie). Term is four turns. The incumbent remains as caretaker until a successor is seated and may run again.
 - 209. A majority of seated members marking impeach in one turn vacates the presidency immediately.
 - 210. Any member may nominate any seated member, including themselves. A nomination should include a platform written to the workspace.
-- 211. Any member may move to `add_member` (unique id + standing values) or `remove_member`. There is no numerical cap unless `gov.max_members` says so. A newly seated member acts on the next turn.
+- 211. Any member may move to `add_member` (unique id + standing values) or `remove_member`. There is no numerical cap unless `membership.max_members` says so. A newly seated member acts on the next turn.
 - 212. At founding the presidency is vacant. First business is the first election; then the President should enact a goal and write toward it.
 
-They can turn 201 into supermajority, invent sequential debate, create a speaker who alone may propose, etc. The host will follow the clerk's compilation of whatever they pass, still clipped by 100-series.
+They can change rule 201 to a supported supermajority, alter election timing, disable elections or impeachment, cap membership, and change presidential privileges. Sequential debate, ranked choice, or a judiciary remain nonbinding until the host publishes mechanics for them.
 
 ## Turn loop
 
@@ -278,7 +279,7 @@ Mitigation: each citizen sees the constitution, current goals, the open motion, 
 
 ## Open questions (can wait until after a founding run)
 
-- When they invent a *new* office name, do we require a `set_param` on privileges before it does anything? (v0: yes.)
+- When they invent a new office name, should the published constitutional vocabulary grow to support it? (v0: unsupported office mechanics remain nonbinding.)
 - One open motion (seed 203) vs a docket — Nomic usually allows more; v0 stays serial for cost.
 
 ## Later, if v0 works

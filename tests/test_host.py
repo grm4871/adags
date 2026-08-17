@@ -1,3 +1,5 @@
+import json
+
 from adags.gov import plurality_winner, seat_president
 from adags.host import _apply_many, authorize_operator_turns, run_turn, veto_last
 from adags.llm import ScriptedLLM
@@ -96,6 +98,7 @@ def test_bare_run_under_cap_does_not_raise():
 
 def test_veto_of_only_goal_restores_empty_register(tmp_path):
     state = init_run(tmp_path / "run")
+    state.write_gov(seat_president(state.gov(), "continuity", 1))
     _apply_many(
         state,
         [{"type": "set_goal", "id": "g1", "text": "Temporary goal"}],
@@ -106,6 +109,62 @@ def test_veto_of_only_goal_restores_empty_register(tmp_path):
     assert state.goals() == {"g1": "Temporary goal"}
     assert veto_last(state) == "vetoed goal-act"
     assert state.goals() == {}
+
+
+def test_amending_motion_threshold_changes_host_behavior(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=4, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "ambition", 1))
+    state.write_goals({"g1": "Test executable law."})
+    members = ["continuity", "ambition", "restraint", "skeptic", "builder"]
+
+    amend = []
+    for mid in members:
+        amend.append(
+            {
+                "speech": "Require unanimity.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": (
+                    {
+                        "title": "Unanimous motions",
+                        "text": "A motion now requires unanimity.",
+                        "effects": [{
+                            "type": "amend_rule",
+                            "id": "201",
+                            "text": "A motion passes only with unanimous support.",
+                            "mechanics": {"motion.threshold": "unanimous"},
+                        }],
+                    }
+                    if mid == "continuity" else None
+                ),
+                "vote_motion": None if mid == "continuity" else "aye",
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=amend))
+    assert state.gov()["vote_rule"] == "unanimous"
+
+    vote = []
+    for mid in members:
+        vote.append(
+            {
+                "speech": "Test the new threshold.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": (
+                    {"title": "Three votes are not enough", "text": "test", "effects": [{"type": "no_op"}]}
+                    if mid == "continuity" else None
+                ),
+                "vote_motion": None if mid == "continuity" else ("aye" if mid in {"ambition", "restraint"} else "nay"),
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=vote))
+    closed = state.root / "motions" / "m2-continuity.json"
+    assert closed.exists()
+    assert json.loads(closed.read_text())["passed"] is False
 
 
 def test_plurality_helper():
@@ -260,7 +319,7 @@ def test_seat_then_add_member_motion(tmp_path):
     assert len(ids) == 6
 
 
-def test_add_member_blocked_while_goals_empty(tmp_path):
+def test_membership_is_governed_by_law_not_goal_heuristics(tmp_path):
     state = init_run(tmp_path / "run", turn_cap=4, usd_cap=1.0)
     state.write_gov(seat_president(state.gov(), "ambition", 1))
     scripts = []
@@ -292,5 +351,5 @@ def test_add_member_blocked_while_goals_empty(tmp_path):
         )
     run_turn(state, ScriptedLLM(scripts=scripts))
     ids = [m["id"] for m in state.members()]
-    assert "herald" not in ids
+    assert "herald" in ids
     assert not (state.root / "motions" / "open.json").exists()

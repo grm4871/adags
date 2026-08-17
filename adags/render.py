@@ -727,6 +727,14 @@ def law_text(state: RunState) -> str:
     return state.constitution().rstrip()
 
 
+def suggestions_text(state: RunState) -> str:
+    box = state.root / "suggestions"
+    files = sorted(box.glob("*.md")) if box.exists() else []
+    if not files:
+        return "(suggestion box empty)"
+    return "\n\n".join(p.read_text(encoding="utf-8").rstrip() for p in files)
+
+
 def doctor_text() -> str:
     rows = []
 
@@ -758,6 +766,7 @@ commands  (leading / optional)
   law                 constitution
   goals               goal register
   members             seated citizens
+  suggestions         host-facing suggestions from the polity
   veto                reverse last reversible act
   petition <text>     inject a bill
   doctor              keys, hermes, provider

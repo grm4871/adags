@@ -7,7 +7,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from adags.gov import is_member_id, office, set_param, who_may
+from adags.constitution import validate_patch, value
+from adags.gov import is_member_id, office
 from adags.seed import DEFAULT_VALUES
 
 RULE_ID_RE = re.compile(r"^(\d{3})\b")
@@ -21,9 +22,9 @@ LEGISLATIVE_OK = frozenset(
         "repeal_goal",
         "add_member",
         "remove_member",
-        "set_param",
         "appoint",
         "write_workspace",
+        "suggest_host_change",
         "no_op",
     }
 )
@@ -124,46 +125,10 @@ def propose_effects(prop: dict | None) -> list[dict]:
     return coerce_effects(keyed) if keyed else []
 
 
-def salvage_motion_effects(motion: dict) -> list[dict]:
-    """Compile common spoken bills the clerk leaves empty."""
-    text = f"{motion.get('title') or ''} {motion.get('text') or ''}"
-    out: list[dict] = []
-    rg = re.search(r"repeal_goal\s+([a-z0-9_-]+)", text, re.I)
-    if rg:
-        out.append({"type": "repeal_goal", "id": rg.group(1)})
-    repl = re.search(
-        r"replace(?:e)? with\s+(?:a\s+)?(.+)",
-        text,
-        re.I | re.S,
-    )
-    if repl:
-        out.append(
-            {
-                "type": "set_goal",
-                "id": "goal1",
-                "text": " ".join(repl.group(1).split())[:800],
-            }
-        )
-    am = re.search(
-        r"(?:amend(?:_rule)?|constitutional amendment)\s+(?:rule\s+)?(\d{3})?\s*:?\s*(.+)",
-        text,
-        re.I | re.S,
-    )
-    if am and not out:
-        rid = (am.group(1) or "").strip()
-        body = " ".join((am.group(2) or "").split())
-        if body:
-            fx: dict[str, Any] = {"type": "amend_rule", "text": body[:800]}
-            if rid:
-                fx["id"] = rid
-            out.append(fx)
-    return out
-
-
 def apply_effect(
     effect: dict,
     *,
-    constitution: str,
+    law: dict,
     goals: dict[str, str],
     members: list[dict],
     gov: dict,
@@ -174,7 +139,7 @@ def apply_effect(
 ) -> tuple[dict[str, Any], dict | None]:
     """
     Apply one effect. Returns (result, inverse_or_none).
-    result: {ok, note, constitution?, goals?, members?, gov?, writes?}
+    result: {ok, note, law?, goals?, members?, gov?, writes?}
     """
     effect = normalize_effect(effect) or {}
     kind = effect.get("type")
@@ -185,90 +150,78 @@ def apply_effect(
         return {"ok": False, "note": f"{kind} is not an executive effect"}, None
 
     if kind in EXECUTIVE_TYPES and source == "executive":
-        holders = who_may(gov, kind, members)
-        if holders and actor not in holders:
+        holder = (office(gov) or {}).get("holder")
+        privileges = value(law, "offices.president.privileges", [])
+        holders = {holder} if holder and kind in privileges else set()
+        if actor not in holders:
             return {"ok": False, "note": f"{kind} requires office privilege (holders: {sorted(holders)})"}, None
 
-    if source == "motion" and kind == "appoint" and gov.get("election_enabled") and effect.get("office", "president") == "president":
+    if source == "motion" and kind == "appoint" and value(law, "election.enabled", True) and effect.get("office", "president") == "president":
         return {"ok": False, "note": "appoint president is inert while election_enabled"}, None
 
     if kind == "no_op":
         return {"ok": True, "note": "no_op"}, None
 
     if kind == "amend_rule":
-        return _amend_rule(effect, constitution)
+        return _amend_rule(effect, law)
     if kind == "repeal_rule":
-        return _repeal_rule(effect, constitution)
+        return _repeal_rule(effect, law)
     if kind == "set_goal":
         return _set_goal(effect, goals)
     if kind == "repeal_goal":
         return _repeal_goal(effect, goals)
     if kind == "add_member":
-        return _add_member(effect, members, gov)
+        return _add_member(effect, members, law)
     if kind == "remove_member":
         return _remove_member(effect, members, gov)
-    if kind == "set_param":
-        return _set_param(effect, gov, constitution)
     if kind == "appoint":
         return _appoint(effect, members, gov, turn)
     if kind == "write_workspace":
         return _write_workspace(effect, workspace)
+    if kind == "suggest_host_change":
+        return _suggest_host_change(effect, workspace, turn, actor)
     return {"ok": False, "note": f"inert {kind}"}, None
 
 
-def _amend_rule(effect: dict, constitution: str) -> tuple[dict, dict | None]:
+def _amend_rule(effect: dict, law: dict) -> tuple[dict, dict | None]:
     rid = str(effect.get("id") or "").strip()
     text = str(effect.get("text") or effect.get("value") or "").strip()
     if not rid or _rule_num(rid) is None:
-        if not text:
-            return {"ok": False, "note": "amend_rule needs numeric id"}, None
-        nums = []
-        for line in constitution.splitlines():
-            m = re.match(r"^(\d{3})\.", line.strip())
-            if m:
-                nums.append(int(m.group(1)))
-        nxt = max([n for n in nums if n >= 200] or [212]) + 1
-        rid = f"{nxt:03d}"
+        return {"ok": False, "note": "amend_rule needs a numeric rule id"}, None
     if _is_immutable(rid):
         return {"ok": False, "note": f"cannot amend immutable rule {rid}"}, None
+    mechanics = effect.get("mechanics")
+    problem = validate_patch(mechanics)
+    if problem:
+        return {"ok": False, "note": problem}, None
     if not text:
-        return {"ok": False, "note": "amend_rule needs text"}, None
-    lines = constitution.splitlines()
-    pattern = re.compile(rf"^{re.escape(rid)}\.")
-    replaced = False
-    old = None
-    new_lines = []
-    for line in lines:
-        if pattern.match(line.strip()):
-            old = line
-            new_lines.append(f"{rid}. {text}")
-            replaced = True
-        else:
-            new_lines.append(line)
-    if not replaced:
-        new_lines.append(f"{rid}. {text}")
-        inverse = {"type": "repeal_rule", "id": rid}
-    else:
-        inverse = {"type": "amend_rule", "id": rid, "text": old.split(". ", 1)[-1] if old else ""}
-    return {"ok": True, "note": f"amended {rid}", "constitution": "\n".join(new_lines) + "\n"}, inverse
+        return {"ok": False, "note": "amend_rule needs human-readable text"}, None
+    new_law = deepcopy(law)
+    old = deepcopy((new_law.get("rules") or {}).get(rid))
+    for other_id, rule in (new_law.get("rules") or {}).items():
+        if other_id != rid and set(mechanics) & set(rule.get("mechanics") or {}):
+            return {"ok": False, "note": f"mechanic belongs to rule {other_id}"}, None
+    merged = deepcopy((old or {}).get("mechanics") or {})
+    merged.update(mechanics)
+    new_law.setdefault("rules", {})[rid] = {"text": text, "mechanics": merged}
+    inverse = {"type": "_restore_rule", "id": rid, "rule": old}
+    return {"ok": True, "note": f"amended executable rule {rid}", "law": new_law}, inverse
 
 
-def _repeal_rule(effect: dict, constitution: str) -> tuple[dict, dict | None]:
+def _repeal_rule(effect: dict, law: dict) -> tuple[dict, dict | None]:
     rid = str(effect.get("id") or "").strip()
     if _is_immutable(rid):
         return {"ok": False, "note": f"cannot repeal immutable rule {rid}"}, None
-    pattern = re.compile(rf"^{re.escape(rid)}\.")
-    old = None
-    kept = []
-    for line in constitution.splitlines():
-        if pattern.match(line.strip()):
-            old = line
-        else:
-            kept.append(line)
+    old = deepcopy((law.get("rules") or {}).get(rid))
     if old is None:
         return {"ok": False, "note": f"no such rule {rid}"}, None
-    inverse = {"type": "amend_rule", "id": rid, "text": old.split(". ", 1)[-1]}
-    return {"ok": True, "note": f"repealed {rid}", "constitution": "\n".join(kept) + "\n"}, inverse
+    if old.get("mechanics"):
+        return {"ok": False, "note": f"rule {rid} has executable mechanics; amend or disable it instead"}, None
+    new_law = deepcopy(law)
+    del new_law["rules"][rid]
+    return {"ok": True, "note": f"repealed resolution {rid}", "law": new_law}, {
+        "type": "_restore_rule", "id": rid, "rule": old
+    }
 
 
 def _set_goal(effect: dict, goals: dict[str, str]) -> tuple[dict, dict | None]:
@@ -299,25 +252,16 @@ def _repeal_goal(effect: dict, goals: dict[str, str]) -> tuple[dict, dict | None
     }
 
 
-def _add_member(effect: dict, members: list[dict], gov: dict) -> tuple[dict, dict | None]:
+def _add_member(effect: dict, members: list[dict], law: dict) -> tuple[dict, dict | None]:
     mid = str(effect.get("id") or "").strip().lower()
     if not is_member_id(mid):
         return {"ok": False, "note": "add_member needs a slug id [a-z][a-z0-9_-]{0,31}"}, None
     if any(m["id"] == mid for m in members):
         return {"ok": False, "note": f"{mid} is already seated"}, None
-    cap = gov.get("max_members")
+    cap = value(law, "membership.max_members")
     if cap is not None and len(members) >= int(cap):
         return {"ok": False, "note": f"electorate is at max_members={cap}"}, None
     values = str(effect.get("values") or "").strip()
-    if not values or values.startswith("You were seated as "):
-        raw = str(effect.get("text") or effect.get("speech") or "")
-        grabbed = re.search(
-            r"(?:standing\s+)?values?\s*[:\-]\s*(.+)",
-            raw,
-            re.I | re.S,
-        )
-        if grabbed:
-            values = " ".join(grabbed.group(1).split())[:600]
     if not values:
         values = DEFAULT_VALUES
     new_members = deepcopy(members)
@@ -350,65 +294,6 @@ def _remove_member(effect: dict, members: list[dict], gov: dict) -> tuple[dict, 
         "members": new_members,
         "gov": new_gov,
     }, {"type": "add_member", "id": mid, "values": target.get("values", "")}
-
-
-_PARAM_ALIASES = {
-    "max_member": "max_members",
-    "term": "term_length",
-    "terms": "term_length",
-    "term_len": "term_length",
-}
-
-_TERM_WORDS = {
-    1: "one",
-    2: "two",
-    3: "three",
-    4: "four",
-    5: "five",
-    6: "six",
-    7: "seven",
-    8: "eight",
-    9: "nine",
-    10: "ten",
-}
-
-
-def normalize_param_key(key: str) -> str:
-    text = str(key or "").strip()
-    if text.startswith("gov."):
-        text = text[4:]
-    return _PARAM_ALIASES.get(text, text)
-
-
-def sync_term_rule(constitution: str, length: int) -> str:
-    word = _TERM_WORDS.get(int(length), str(length))
-    return re.sub(
-        r"Term is (?:\w+|\d+) turns",
-        f"Term is {word} turns",
-        constitution,
-        count=1,
-    )
-
-
-def _set_param(effect: dict, gov: dict, constitution: str = "") -> tuple[dict, dict | None]:
-    key = normalize_param_key(str(effect.get("key") or ""))
-    value = effect.get("value")
-    old = _lookup(gov, key)
-    result = set_param(gov, key, value)
-    if isinstance(result, str):
-        return {"ok": False, "note": result}, None
-    out: dict[str, Any] = {"ok": True, "note": f"set {key}", "gov": result}
-    if key == "term_length" and constitution:
-        updated = sync_term_rule(constitution, int(result["term_length"]))
-        if updated != constitution:
-            out["constitution"] = updated
-    return out, {"type": "set_param", "key": key, "value": old}
-
-
-def _lookup(gov: dict, key: str) -> Any:
-    if key == "offices.president.privileges":
-        return (office(gov) or {}).get("privileges")
-    return gov.get(key)
 
 
 def _appoint(effect: dict, members: list[dict], gov: dict, turn: int) -> tuple[dict, dict | None]:
@@ -455,6 +340,31 @@ def _write_workspace(effect: dict, workspace: Path) -> tuple[dict, dict | None]:
     }, inverse
 
 
+def _suggest_host_change(
+    effect: dict, workspace: Path, turn: int, actor: str | None
+) -> tuple[dict, dict | None]:
+    title = str(effect.get("title") or "Host suggestion").strip()[:120]
+    text = str(effect.get("text") or effect.get("description") or "").strip()
+    if not text:
+        return {"ok": False, "note": "suggest_host_change needs text"}, None
+    box = workspace.parent / "suggestions"
+    box.mkdir(exist_ok=True)
+    stem = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "suggestion"
+    rel = f"t{turn}-{actor or 'chamber'}-{stem}.md"
+    dest = box / rel
+    suffix = 2
+    while dest.exists():
+        dest = box / f"t{turn}-{actor or 'chamber'}-{stem}-{suffix}.md"
+        suffix += 1
+    dest.write_text(
+        f"# {title}\n\nFrom: {actor or 'chamber'}\nTurn: {turn}\nStatus: pending host review\n\n{text}\n",
+        encoding="utf-8",
+    )
+    return {"ok": True, "note": f"filed host suggestion {dest.name}"}, {
+        "type": "_delete_suggestion", "path": dest.name
+    }
+
+
 def apply_inverse(inverse: dict, *, workspace: Path, **kwargs) -> dict:
     if inverse.get("type") == "_delete_workspace":
         rel = _safe_relpath(str(inverse.get("path") or ""))
@@ -464,6 +374,21 @@ def apply_inverse(inverse: dict, *, workspace: Path, **kwargs) -> dict:
         if dest.exists():
             dest.unlink()
         return {"ok": True, "note": f"deleted workspace/{rel}"}
+    if inverse.get("type") == "_delete_suggestion":
+        name = Path(str(inverse.get("path") or "")).name
+        dest = workspace.parent / "suggestions" / name
+        if dest.exists():
+            dest.unlink()
+        return {"ok": True, "note": f"deleted suggestion/{name}"}
+    if inverse.get("type") == "_restore_rule":
+        law = deepcopy(kwargs["law"])
+        rid = str(inverse.get("id") or "")
+        rule = inverse.get("rule")
+        if rule is None:
+            law.get("rules", {}).pop(rid, None)
+        else:
+            law.setdefault("rules", {})[rid] = deepcopy(rule)
+        return {"ok": True, "note": f"restored rule {rid}", "law": law}
     result, _ = apply_effect(inverse, workspace=workspace, actor=None, source="veto", **kwargs)
     return result
 

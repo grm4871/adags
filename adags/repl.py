@@ -16,6 +16,7 @@ from adags.render import (
     law_text,
     members_text,
     status_block,
+    suggestions_text,
 )
 from adags.state import RunState, archive_run, init_run
 
@@ -61,6 +62,8 @@ def dispatch(state: RunState, cmd: ReplCmd, *, root: Path) -> tuple[str, bool]:
         return goals_text(state), False
     if n in {"members", "who"}:
         return members_text(state), False
+    if n in {"suggestions", "suggestion", "box"}:
+        return suggestions_text(state), False
     if n == "doctor":
         return doctor_text(), False
     if n == "banner":

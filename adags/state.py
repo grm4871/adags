@@ -9,9 +9,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from adags.constitution import default_constitution, render
 from adags.effects import parse_goals, render_goals
 from adags.seed import (
-    CONSTITUTION,
     FOUNDING_MEMBERS,
     GOALS_EMPTY,
     default_control,
@@ -37,10 +37,38 @@ class RunState:
         self.path(name).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def constitution(self) -> str:
-        return self.path("constitution.md").read_text(encoding="utf-8")
+        return render(self.law())
 
-    def write_constitution(self, text: str) -> None:
-        self.path("constitution.md").write_text(text, encoding="utf-8")
+    def law(self) -> dict:
+        path = self.path("constitution.json")
+        if path.exists():
+            return self.load_json("constitution.json")
+        law = default_constitution()
+        # One-time migration for runs created before executable constitutions.
+        if self.path("gov.json").exists():
+            gov = self.gov()
+            law["rules"]["201"]["mechanics"]["motion.threshold"] = gov.get("vote_rule", "majority")
+            law["rules"]["207"]["mechanics"]["offices.president.privileges"] = (
+                (gov.get("offices") or {}).get("president", {}).get("privileges")
+                or ["write_workspace", "set_goal"]
+            )
+            law["rules"]["208"]["mechanics"].update(
+                {
+                    "election.enabled": gov.get("election_enabled", True),
+                    "election.method": gov.get("election_rule", "plurality"),
+                    "election.term_length": gov.get("term_length", 4),
+                }
+            )
+            law["rules"]["209"]["mechanics"]["impeachment.threshold"] = gov.get(
+                "impeach_threshold", "majority"
+            )
+            law["rules"]["211"]["mechanics"]["membership.max_members"] = gov.get("max_members")
+        self.write_law(law)
+        return law
+
+    def write_law(self, law: dict) -> None:
+        self.dump_json("constitution.json", law)
+        self.path("constitution.md").write_text(render(law), encoding="utf-8")
 
     def goals(self) -> dict[str, str]:
         p = self.path("goals.md")
@@ -115,9 +143,9 @@ def init_run(root: Path, *, turn_cap: int = 12, usd_cap: float = 3.0) -> RunStat
     (root / "workspace" / "platforms").mkdir(parents=True, exist_ok=True)
     (root / "petitions").mkdir(exist_ok=True)
     (root / "motions").mkdir(exist_ok=True)
+    (root / "suggestions").mkdir(exist_ok=True)
     state = RunState(root)
-    if not state.path("constitution.md").exists():
-        state.write_constitution(CONSTITUTION)
+    state.write_law(state.law())
     if not state.path("goals.md").exists():
         state.path("goals.md").write_text(GOALS_EMPTY, encoding="utf-8")
     if not state.path("members.json").exists():
