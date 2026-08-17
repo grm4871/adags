@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from adags.gov import as_member_id, election_due, party_roster, president_id, threshold
-from adags.llm import LLM, extract_json, salvage_act
+from adags.gov import (
+    as_member_id,
+    consecutive_blocked,
+    election_due,
+    party_roster,
+    president_id,
+    threshold,
+)
+from adags.brief import digest_for_card
+from adags.llm import LLM, extract_json, fulfill_speech, salvage_act
 
 CITIZEN_SYSTEM = """You are citizen `{member_id}` in ADAGS.
 
@@ -14,20 +22,25 @@ Values: {values}
 Act. Do not recap the brief, quote the law back, or walk the fields. Speech is what the chamber hears.
 
 One JSON object, first key speech:
-{{"speech":"I nominate myself.","nominate":{{"member":"{member_id}","platform":"short platform"}},"vote_election":null,"impeach":false,"propose":null,"vote_motion":null,"executive":null,"party":null}}
+{{"speech":"I nominate myself.","nominate":{{"member":"{member_id}","platform":"short platform"}},"vote_election":null,"impeach":false,"propose":null,"vote_motion":null,"executive":null,"party":null,"scratch":null}}
 
 If speech nominates, votes, or proposes, the matching field must be filled. Talk with no field is not an act.
 
 - speech: <=400 characters. Chamber remarks only.
+- scratch: <=160 characters, private, for you next turn. Not speech. Use it to remember a mechanic path, a file to write, or why the last bill died. Read host: lines in your acts — that is what actually executed.
 - nominate / vote_election: only in nominate / ballot phase.
-- impeach: true only to fire the President this turn.
+- impeach: a chamber or host article id (e.g. "303") to fire the President this turn. Bare true does not count. A threat is not a mark.
 - If a motion is open: vote_motion aye|nay|abstain. Do not propose another.
-- If none is open and you want a law: propose with effects. Do not only describe it.
-- executive: President only. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact. Voting a membership bill is not using office.
-- Motions may use: amend_rule (200+ with text and a validated mechanics object), repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op. set_goal and write_workspace are floor effects only if current law does not reserve them as presidential privileges.
-- Exact amendment shape: {{"type":"amend_rule","id":"213","text":"Motions require two thirds.","mechanics":{{"motion.threshold":"two_thirds"}}}}. mechanics contains published paths directly; never put amend_rule inside mechanics.
-- Executable amendment mechanics are shown in the constitution. Unsupported mechanics and prose-only amendments are nonbinding.
-- If the host lacks a mechanic you want, use suggest_host_change with title and text. It enters the operator's suggestion box and never changes law by itself.
+- If none is open and you want a law: propose amend_rule with the sentence you want in the constitution. Do not only describe it.
+- Chamber law (300+) is yours. The host will not execute it. Members enforce it — cite it, vote it, impeach for it.
+- Host law (200-series knobs) is physics. To change a knob, attach a published mechanics object. To write a norm the program cannot run, use id 300+ or omit mechanics; it becomes chamber law.
+- executive: President only, unless chamber/host law says otherwise. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact.
+- set_goal: a new id (goal2, goal3) adds a slot; reuse an id to replace that slot. At most three live goals — repeal_goal before a fourth. write_workspace needs path and a real body, not an empty file.
+- A sentence already on the books is already law. repeal_rule it; do not restack it. The sitting President cannot be nominated for the next term.
+- Motions may use: amend_rule, repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op.
+- Example chamber article: {{"type":"amend_rule","id":"302","text":"Workspace artifacts must name the active goal."}}
+- Example host knob: {{"type":"amend_rule","id":"201","text":"Motions require two thirds.","mechanics":{{"motion.threshold":"two_thirds"}}}}
+- If you want a new host knob, suggest_host_change. It never changes physics by itself.
 - Do not propose add_member while goals are none. Impeach a President who leaves goals empty.
 
 - party: invent a slug and found a caucus, or join one already listed this turn. "none" leaves. null stays. We do not name parties for you.
@@ -93,15 +106,38 @@ def _goals_empty(goals_md: str) -> bool:
 
 
 def _interior_law(constitution: str) -> str:
-    """Send 200-series only. 100-series is host physics; no need to pay to reread it."""
-    lines = []
-    take = False
+    """Chamber law + host 200-series. Drop immutable 100-series."""
+    chunks: list[str] = []
+    buf: list[str] = []
+    keep = False
+
+    def flush() -> None:
+        if keep and buf:
+            chunks.append("\n".join(buf).strip())
+
     for line in constitution.splitlines():
-        if line.startswith("## 200"):
-            take = True
-        if take:
-            lines.append(line)
-    text = "\n".join(lines).strip()
+        if line.startswith("## "):
+            flush()
+            buf = [line]
+            low = line.lower()
+            keep = "chamber" in low or "200-series" in low or (
+                "host law" in low and "100" not in low
+            )
+            if "100-series" in low or "immutable" in low:
+                keep = False
+            continue
+        if line.startswith("### "):
+            flush()
+            buf = [line]
+            low = line.lower()
+            keep = "200-series" in low
+            if "100-series" in low:
+                keep = False
+            continue
+        if keep:
+            buf.append(line)
+    flush()
+    text = "\n\n".join(c for c in chunks if c)
     return text or constitution
 
 
@@ -116,6 +152,10 @@ def snapshot_user(
     digest: str,
     petitions: list[str],
     turn: int,
+    workspace_md: str = "",
+    last_act_line: str = "",
+    goal_clock: str = "",
+    identical_line: str = "",
 ) -> str:
     seated = ", ".join(m["id"] for m in members)
     prez = president_id(gov) or "(vacant)"
@@ -137,10 +177,13 @@ def snapshot_user(
     if phase == "ballot":
         names = ", ".join(n.get("member", "?") for n in nominees) or "(none)"
         tally = ", ".join(f"{w}→{p}" for w, p in ballots.items()) or "none"
+        blocked = consecutive_blocked(gov)
+        ineligible = f" {blocked} is ineligible this election (consecutive term)." if blocked else ""
         host_truth = (
             f"HOST: live ballot. {prez} is caretaker only. "
             f"A successor is seated only after {need} valid vote_election values. "
             f"Legal votes: {names}. Recorded: {tally} ({len(ballots)}/{need}). Speeches do not count."
+            f"{ineligible}"
         )
         digest = host_truth
     elif phase == "nominate":
@@ -148,21 +191,28 @@ def snapshot_user(
             who = f"{prez} is caretaker until a successor is seated. "
         else:
             who = "Presidency is vacant. "
+        blocked = consecutive_blocked(gov)
+        ineligible = (
+            f"{blocked} is ineligible this election (consecutive term). "
+            if blocked
+            else ""
+        )
         host_truth = (
-            f"HOST: nominations are open. {who}"
-            "nominate a seated member (self is allowed) and include a platform that "
+            f"HOST: nominations are open. {who}{ineligible}"
+            "nominate a seated member (self is allowed unless ineligible) and include a platform that "
             "names a goal and a file you would produce. vote_election is inert. "
             "You cannot nominate someone who is not seated. "
             "If you are President, you may still write_workspace toward current goals."
         )
-        digest = (digest or "")[-800:]
+        digest = digest_for_card(digest)
     elif prez and prez != "(vacant)":
         if _goals_empty(goals_md):
             host_truth = (
                 f"HOST: the election is over. {prez} is President. Goals are empty — failure. "
                 "nominate and vote_election do nothing this turn. "
                 "If you are President, executive set_goal this turn and write_workspace. "
-                "If you are not, do not add_member; impeach:true unless the President files a goal. "
+                "If you are not, do not add_member; impeach with a cited article "
+                "(207) unless the President files a goal. "
                 "If you announce a bill, put it in propose with effects."
             )
         else:
@@ -172,18 +222,29 @@ def snapshot_user(
                 "If you announce a bill, put it in propose with effects. "
                 "If you are President, use executive (set_goal or write_workspace) this turn."
             )
-        digest = (digest or "")[-800:]
+            if goal_clock:
+                host_truth += (
+                    f" Goals: {goal_clock}. "
+                    "Repeal or replace a complete or overdue goal."
+                )
+        digest = digest_for_card(digest)
     else:
         host_truth = "HOST: presidency vacant. First business is nominations."
-        digest = (digest or "")[-800:]
+        digest = digest_for_card(digest)
     motion = "(none)"
     if open_motion:
+        from adags.render import motion_label
+
         motion = (
-            f"#{open_motion.get('id')} {open_motion.get('title')}\n"
+            f"#{open_motion.get('id')} {motion_label(open_motion)}\n"
             f"{open_motion.get('text')}\n"
             f"effects: {open_motion.get('effects')}\n"
             f"votes: {open_motion.get('votes')}"
         )
+        if election_due(gov, turn) and phase == "idle":
+            host_truth += " An election is due; it waits until this motion closes."
+    if identical_line:
+        host_truth += f" HOST: {identical_line}."
     pet = "\n\n".join(petitions) if petitions else "(none)"
     if len(pet) > 600:
         pet = pet[:600] + "\n…"
@@ -194,6 +255,8 @@ def snapshot_user(
     else:
         role = "not President"
     extra = f"\n{host_truth}\n" if host_truth else "\n"
+    files = (workspace_md or "").strip() or "(empty)"
+    prior = (last_act_line or "").strip() or "(none yet)"
     roster = party_roster(members)
     if roster:
         parties = "\n".join(f"- {name}: {', '.join(ids)}" for name, ids in sorted(roster.items()))
@@ -216,10 +279,16 @@ Goals:
 Petitions:
 {pet}
 
+Workspace:
+{files}
+
+Last time you acted:
+{prior}
+
 Last turn:
 {digest}
 
-200-series (do not restate; 100-series is host physics):
+Law (chamber series is yours to enforce; 200-series knobs are host physics; do not recap):
 {law}
 
 JSON only. Do not narrate this card.
@@ -290,22 +359,51 @@ def citizen_act(
         system=system, user=user, on_token=on_token, on_think=on_think, prefix=ACT_PREFIX
     )
     data, parse_error = _parse_act(raw.text)
-    if not _usable_act(data, required) and not raw.error:
-        requirement = f" Fill `{required}` with a real structured act." if required else " Fill one structured action field."
-        raw2 = llm.complete(
-            system=system,
-            user=user.rstrip() + "\n\n" + _REPAIR_USER + requirement,
-            on_token=on_token,
-            on_think=on_think,
-            prefix=ACT_PREFIX,
+    data = fulfill_speech(data, member_id=member["id"], president=president)
+    if not _usable_act(data, required):
+        requirement = (
+            f" Fill `{required}` with a real structured act."
+            if required
+            else " Fill one structured action field."
         )
+        saved = (
+            getattr(llm, "timeout", None),
+            getattr(llm, "think_timeout", None),
+            getattr(llm, "first_token_timeout", None),
+        )
+        try:
+            if saved[0] is not None:
+                llm.timeout = min(float(saved[0]), 8.0)
+            if saved[1] is not None:
+                llm.think_timeout = min(float(saved[1]), 6.0)
+            if saved[2] is not None:
+                llm.first_token_timeout = min(float(saved[2]), 5.0)
+            raw2 = llm.complete(
+                system=system,
+                user=user.rstrip() + "\n\n" + _REPAIR_USER + requirement,
+                on_token=on_token,
+                on_think=on_think,
+                prefix=ACT_PREFIX,
+            )
+        finally:
+            if saved[0] is not None:
+                llm.timeout = saved[0]
+            if saved[1] is not None:
+                llm.think_timeout = saved[1]
+            if saved[2] is not None:
+                llm.first_token_timeout = saved[2]
         data2, parse2 = _parse_act(raw2.text)
+        data2 = fulfill_speech(data2, member_id=member["id"], president=president)
         if _usable_act(data2, required):
             raw = raw2
             data = data2
             parse_error = parse2
         else:
             parse_error = parse_error or parse2
+    if required == "vote_motion" and not data.get("vote_motion"):
+        data["vote_motion"] = "abstain"
+        if not str(data.get("speech") or "").strip():
+            data["speech"] = "(abstain)"
     data["_usage"] = {
         "input_tokens": raw.input_tokens,
         "output_tokens": raw.output_tokens,
@@ -318,7 +416,9 @@ def citizen_act(
     data["speech"] = str(data.get("speech") or "")[:400]
     if _protocol_speech(data["speech"]):
         data["speech"] = ""
-    if raw.error and not data["speech"]:
+    if raw.error and not data.get("vote_motion") and not data.get("vote_election") and not data.get(
+        "nominate"
+    ) and not data.get("executive") and not data["speech"]:
         data["speech"] = f"(timeout/error) {raw.error}"[:400]
     return data
 

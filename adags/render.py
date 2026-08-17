@@ -381,7 +381,7 @@ def act_marks(
     seated: list[str] | None = None,
 ) -> list[str]:
     """Chamber marks the host will honor. Wrong-phase acts are marked ignored."""
-    from adags.gov import as_flag, as_member_id
+    from adags.gov import as_impeach, as_member_id
 
     marks: list[str] = []
     seated_set = set(seated or [])
@@ -408,8 +408,9 @@ def act_marks(
             marks.append(f"votes {vote}")
         else:
             marks.append(f"ignored vote ({phase})")
-    if as_flag(act.get("impeach")):
-        marks.append("impeach")
+    marked, article = as_impeach(act.get("impeach"))
+    if marked:
+        marks.append(f"impeach {article}" if article else "impeach")
     if act.get("party") is not None:
         from adags.gov import as_party_id
 
@@ -420,7 +421,14 @@ def act_marks(
             marks.append("leaves party")
     prop = act.get("propose")
     if isinstance(prop, dict) and (prop.get("title") or prop.get("text") or prop.get("effects")):
-        title = collapse_ws(str(prop.get("title") or "untitled"))
+        from adags.effects import bill_title, propose_effects
+
+        title = bill_title(
+            title=str(prop.get("title") or ""),
+            text=str(prop.get("text") or ""),
+            effects=prop.get("effects") or propose_effects(prop),
+            speech=str(act.get("speech") or ""),
+        )
         marks.append(f"proposes {title}")
     vm = as_ballot(act.get("vote_motion"))
     if vm:
@@ -440,6 +448,7 @@ def paint_mark(mark: str, *, parties: dict[str, str] | None = None) -> str:
         return c("32", mark)
     if (
         mark in {"impeach", "timeout", "error", "no valid act"}
+        or mark.startswith("impeach")
         or mark.startswith("nay")
         or mark.startswith("timeout")
         or mark.startswith("error")
@@ -473,26 +482,55 @@ def format_votes(votes: dict | None, parties: dict[str, str] | None = None) -> s
     return " · ".join(parts)
 
 
-def wrap_field(label: str, text: str, *, width: int | None = None) -> list[str]:
+def motion_label(motion: dict | None) -> str:
+    from adags.effects import bill_title
+
+    if not motion:
+        return "(no bill)"
+    return bill_title(
+        title=str(motion.get("title") or ""),
+        text=str(motion.get("text") or ""),
+        effects=motion.get("effects"),
+    )
+
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+
+
+def visible_width(text: str) -> int:
+    return len(_ANSI_RE.sub("", text or ""))
+
+
+def wrap_field(
+    label: str,
+    text: str,
+    *,
+    width: int | None = None,
+    atom: str | None = None,
+) -> list[str]:
     width = width or term_width()
     pad = f"  {label:<9} "
-    inner = max(20, width - len(pad))
-    words = collapse_ws(text).split()
-    if not words:
+    inner = max(20, width - visible_width(pad))
+    if atom:
+        chunks = [part.strip() for part in (text or "").split(atom) if part.strip()]
+        glue = atom
+    else:
+        chunks = collapse_ws(text).split()
+        glue = " "
+    if not chunks:
         return [pad + "—"]
     lines: list[str] = []
-    cur = words[0]
-    for word in words[1:]:
-        if len(cur) + 1 + len(word) <= inner:
-            cur += " " + word
+    cur = chunks[0]
+    for chunk in chunks[1:]:
+        trial = cur + glue + chunk
+        if visible_width(trial) <= inner:
+            cur = trial
         else:
             lines.append(cur)
-            cur = word
+            cur = chunk
     lines.append(cur)
-    out = [pad + lines[0]]
-    hang = " " * len(pad)
-    out.extend(hang + line for line in lines[1:])
-    return out
+    hang = " " * visible_width(pad)
+    return [pad + lines[0], *[hang + line for line in lines[1:]]]
 
 
 def emit(text: str = "") -> None:
@@ -520,7 +558,7 @@ def turn_open(
 
     roster = party_roster(members or [])
     if roster:
-        for line in wrap_field("parties", format_roster(roster)):
+        for line in wrap_field("parties", format_roster(roster), atom="; "):
             emit(line)
     noms = gov.get("nominees") or []
     if noms:
@@ -531,7 +569,7 @@ def turn_open(
         for line in wrap_field("nominees", named):
             emit(line)
     if motion:
-        for line in wrap_field("bill", str(motion.get("title") or "untitled")):
+        for line in wrap_field("bill", motion_label(motion)):
             emit(line)
         for line in wrap_field("votes", format_votes(motion.get("votes"), parties)):
             emit(line)
@@ -596,7 +634,7 @@ def turn_close(
         for line in wrap_field("nominees", named):
             emit(line)
     if motion:
-        for line in wrap_field("bill", str(motion.get("title") or "untitled")):
+        for line in wrap_field("bill", motion_label(motion)):
             emit(line)
         for line in wrap_field("votes", format_votes(motion.get("votes"), parties)):
             emit(line)
@@ -661,7 +699,7 @@ def status_block(state: RunState) -> str:
 
     roster = party_roster(members)
     if roster:
-        lines.extend(wrap_field("parties", format_roster(roster)))
+        lines.extend(wrap_field("parties", format_roster(roster), atom="; "))
     if goals:
         for gid, text in goals.items():
             lines.extend(wrap_field(str(gid), text))
@@ -672,7 +710,7 @@ def status_block(state: RunState) -> str:
         import json
 
         mot = json.loads(open_m.read_text(encoding="utf-8"))
-        lines.extend(wrap_field("bill", str(mot.get("title") or "untitled")))
+        lines.extend(wrap_field("bill", motion_label(mot)))
         lines.extend(wrap_field("votes", format_votes(mot.get("votes"), parties)))
     return "\n".join(lines)
 
@@ -745,6 +783,8 @@ def doctor_text() -> str:
 
     hermes = shutil.which(os.environ.get("ADAGS_HERMES_BIN", "hermes"))
     row(bool(hermes), "hermes", hermes or "not on PATH")
+    codex = shutil.which(os.environ.get("ADAGS_CODEX_BIN", "codex"))
+    row(bool(codex), "codex", (codex + f"  brief={os.environ.get('ADAGS_BRIEF_MODEL', 'gpt-5.6-luna')}") if codex else "not on PATH")
     row(bool(os.environ.get("OPENROUTER_API_KEY")), "openrouter", "OPENROUTER_API_KEY")
     row(bool(os.environ.get("XAI_API_KEY")), "xai", "XAI_API_KEY")
     row(bool(os.environ.get("OPENAI_API_KEY")), "openai", "OPENAI_API_KEY")

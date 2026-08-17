@@ -32,27 +32,43 @@ DEFAULT_RULES = {
         "text": "A passed motion executes only validated structured host effects.",
         "mechanics": {"motion.resolve_when": "decisive"},
     },
-    "205": {"text": "The goal register contains the polity's current objectives.", "mechanics": {}},
+    "205": {
+        "text": "The goal register holds at most three live objectives; a fourth requires repealing one.",
+        "mechanics": {"goals.max_live": 3},
+    },
     "206": {"text": "Interior rules may be amended only with executable mechanics accepted by the host.", "mechanics": {}},
     "207": {
-        "text": "The President alone may write the workspace and set goals as executive acts.",
+        "text": (
+            "The President alone may write the workspace and set goals as executive acts. "
+            "A published override threshold may let the floor do those acts by motion."
+        ),
         "mechanics": {"offices.president.privileges": ["write_workspace", "set_goal"]},
     },
     "208": {
-        "text": "The President is elected by plurality for four turns; earliest nomination breaks ties.",
+        "text": (
+            "The President is elected by plurality for eight turns and may not "
+            "succeed themselves; earliest nomination breaks ties."
+        ),
         "mechanics": {
             "election.enabled": True,
             "election.method": "plurality",
             "election.tie_break": "earliest_nomination",
             "election.quorum": "majority",
-            "election.term_length": 4,
+            "election.term_length": 8,
+            "election.consecutive_limit": 1,
         },
     },
     "209": {
         "text": "A majority of seated members may impeach the President in one turn.",
         "mechanics": {"impeachment.enabled": True, "impeachment.threshold": "majority"},
     },
-    "210": {"text": "Any member may nominate any seated member, including themselves.", "mechanics": {}},
+    "210": {
+        "text": (
+            "Any seated member may be nominated, including themselves, except the "
+            "sitting President, who may not seek a consecutive term."
+        ),
+        "mechanics": {},
+    },
     "211": {
         "text": "Membership is open unless the polity enacts a numerical cap.",
         "mechanics": {"membership.max_members": None},
@@ -71,15 +87,102 @@ MECHANIC_SPECS: dict[str, tuple[type | tuple[type, ...], Any]] = {
     "election.tie_break": (str, {"earliest_nomination"}),
     "election.quorum": (str, {"majority", "two_thirds", "unanimous"}),
     "election.term_length": (int, range(1, 101)),
+    "election.consecutive_limit": ((int, type(None)), range(0, 11)),
+    "goals.max_live": ((int, type(None)), range(1, 21)),
     "impeachment.enabled": (bool, None),
     "impeachment.threshold": (str, {"majority", "two_thirds", "unanimous"}),
     "membership.max_members": ((int, type(None)), None),
     "offices.president.privileges": (list, None),
+    "offices.president.override": ((str, type(None)), {"majority", "two_thirds", "unanimous"}),
+}
+
+MECHANIC_ALIASES = {
+    "executive.override.threshold": "offices.president.override",
+    "motion.override_president_executive": "offices.president.override",
+    "offices.president.override.threshold": "offices.president.override",
+    "president.override": "offices.president.override",
+}
+
+VALUE_ALIASES = {
+    "supermajority": "two_thirds",
+    "super-majority": "two_thirds",
+    "super_majority": "two_thirds",
+    "2/3": "two_thirds",
+}
+
+
+CHAMBER_MIN = 300
+
+DEFAULT_CHARTER = {
+    "301": {
+        "text": (
+            "This series is written by the chamber. Members enforce it by speech, "
+            "vote, impeachment, and office. The host does not execute these articles."
+        )
+    }
 }
 
 
 def default_constitution() -> dict:
-    return {"version": 1, "rules": deepcopy(DEFAULT_RULES)}
+    return {
+        "version": 2,
+        "rules": deepcopy(DEFAULT_RULES),
+        "charter": deepcopy(DEFAULT_CHARTER),
+    }
+
+
+def next_charter_id(law: dict) -> str:
+    nums = [int(k) for k in (law.get("charter") or {}) if str(k).isdigit()]
+    nxt = max([CHAMBER_MIN - 1, *nums]) + 1
+    return f"{nxt:03d}"
+
+
+def ensure_charter(law: dict) -> dict:
+    out = deepcopy(law)
+    if not out.get("charter"):
+        out["charter"] = deepcopy(DEFAULT_CHARTER)
+    return out
+
+
+def norm_article_text(text: str) -> str:
+    return " ".join(str(text or "").split())
+
+
+def matching_article(law: dict, text: str) -> str | None:
+    """Lowest id whose wording matches after whitespace normalize."""
+    want = norm_article_text(text)
+    if not want:
+        return None
+    items: list[tuple[int, str, str]] = []
+    for rid, article in (law.get("charter") or {}).items():
+        body = article.get("text", article) if isinstance(article, dict) else str(article)
+        items.append((int(rid) if str(rid).isdigit() else 10**9, str(rid), body))
+    for rid, rule in (law.get("rules") or {}).items():
+        items.append((int(rid) if str(rid).isdigit() else 10**9, str(rid), str((rule or {}).get("text") or "")))
+    for _n, rid, body in sorted(items, key=lambda row: row[0]):
+        if norm_article_text(body) == want:
+            return rid
+    return None
+
+
+def identical_charter_line(law: dict) -> str:
+    """Fact line: '302 = 304 = 305 (identical text)'. Empty if none."""
+    buckets: dict[str, list[str]] = {}
+    for rid, article in (law.get("charter") or {}).items():
+        body = article.get("text", article) if isinstance(article, dict) else str(article)
+        key = norm_article_text(body)
+        if key:
+            buckets.setdefault(key, []).append(str(rid))
+    groups = []
+    for ids in buckets.values():
+        if len(ids) < 2:
+            continue
+        ids.sort(key=lambda x: int(x) if x.isdigit() else x)
+        groups.append(" = ".join(ids))
+    if not groups:
+        return ""
+    groups.sort()
+    return "; ".join(groups) + " (identical text)"
 
 
 def mechanics(law: dict) -> dict[str, Any]:
@@ -101,20 +204,54 @@ def apply_to_runtime(gov: dict, law: dict) -> dict:
     out = deepcopy(gov)
     out["vote_rule"] = value(law, "motion.threshold", "majority")
     out["election_rule"] = value(law, "election.method", "plurality")
-    out["term_length"] = value(law, "election.term_length", 4)
+    out["term_length"] = value(law, "election.term_length", 8)
+    out["consecutive_limit"] = value(law, "election.consecutive_limit", 1)
     out["impeach_threshold"] = value(law, "impeachment.threshold", "majority")
     out["election_enabled"] = value(law, "election.enabled", True)
     out["max_members"] = value(law, "membership.max_members")
     return out
 
 
+def canonicalize_patch(patch: dict) -> dict:
+    """Rewrite aliases agents already emit onto published paths and values."""
+    out: dict[str, Any] = {}
+    for raw_path, val in (patch or {}).items():
+        path = MECHANIC_ALIASES.get(str(raw_path), str(raw_path))
+        if isinstance(val, str):
+            key = val.strip().lower().replace(" ", "_")
+            val = VALUE_ALIASES.get(key, val)
+            if val == "none":
+                val = None
+        out[path] = val
+    return out
+
+
+def published_paths() -> str:
+    return ", ".join(sorted(MECHANIC_SPECS))
+
+
 def validate_patch(patch: dict) -> str | None:
     if not isinstance(patch, dict) or not patch:
         return "amend_rule needs a non-empty mechanics object"
+    patch = canonicalize_patch(patch)
     for path, val in patch.items():
         spec = MECHANIC_SPECS.get(path)
         if not spec:
-            return f"unsupported constitutional mechanic {path}"
+            if str(path).startswith("workspace."):
+                return (
+                    f"unsupported mechanic {path} — no workspace.* path is published; "
+                    "use suggest_host_change"
+                )
+            if "override" in str(path) or str(path).startswith("executive."):
+                return (
+                    f"unsupported mechanic {path} — 207 knobs are "
+                    "offices.president.privileges and offices.president.override "
+                    "(majority|two_thirds|unanimous; supermajority=two_thirds)"
+                )
+            return (
+                f"unsupported mechanic {path}. published: {published_paths()}. "
+                "use suggest_host_change for anything else"
+            )
         expected, allowed = spec
         if not isinstance(val, expected) or isinstance(val, bool) and expected is int:
             return f"invalid value for {path}"
@@ -125,17 +262,49 @@ def validate_patch(patch: dict) -> str | None:
             or any(x not in {"write_workspace", "set_goal"} for x in val)
         ):
             return "unsupported presidential privilege"
-        if allowed is not None and val not in allowed:
-            return f"unsupported value for {path}"
+        if allowed is not None and val is not None and val not in allowed:
+            return f"unsupported value for {path} (want {sorted(allowed) if not isinstance(allowed, range) else 'int'})"
     return None
 
 
 def render(law: dict) -> str:
-    lines = ["# Constitution of the run", "", "## 100-series — immutable host physics", ""]
+    lines = [
+        "# Constitution of the run",
+        "",
+        "## Chamber law — enforced by members",
+        "",
+        "The host does not execute this series. Cite it, vote it, impeach for it.",
+        "",
+    ]
+    charter = law.get("charter") or {}
+    if charter:
+        for rid, article in sorted(charter.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+            text = article.get("text", article) if isinstance(article, dict) else str(article)
+            lines.append(f"{rid}. {text}")
+    else:
+        lines.append("(none yet — amend_rule 300+ to write one)")
+    lines.extend(
+        [
+            "",
+            "## Host law — enforced by the program",
+            "",
+            "### 100-series — immutable",
+            "",
+        ]
+    )
     lines.extend(f"{rid}. {text}" for rid, text in HARD_RULES.items())
-    lines.extend(["", "## 200-series — executable interior law", ""])
-    for rid, rule in sorted((law.get("rules") or {}).items()):
+    lines.extend(["", "### 200-series — mutable knobs", ""])
+    for rid, rule in sorted((law.get("rules") or {}).items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
         lines.append(f"{rid}. {rule.get('text', '')}")
         for path, val in (rule.get("mechanics") or {}).items():
             lines.append(f"    - `{path}` = `{val}`")
+    lines.extend(
+        [
+            "",
+            "Published host knobs: " + published_paths() + ".",
+            "Aliases: supermajority = two_thirds; "
+            "executive.override.threshold = offices.president.override.",
+            "A sentence without a published knob is chamber law, not host physics.",
+        ]
+    )
     return "\n".join(lines) + "\n"

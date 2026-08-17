@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+from adags.gov import as_impeach, as_member_id
 from adags.hermes_backend import endpoint
 
 # $/1M tokens. :free and openrouter/free are metered at 0.
@@ -57,6 +58,7 @@ class LLMResult:
     input_rate: float = 1.25
     output_rate: float = 2.50
     error: str | None = None
+    cut: str | None = None
 
     @property
     def usd(self) -> float:
@@ -64,6 +66,26 @@ class LLMResult:
             self.input_tokens * self.input_rate / 1_000_000
             + self.output_tokens * self.output_rate / 1_000_000
         )
+
+
+def _timeout_like(exc: BaseException) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return isinstance(exc, TimeoutError) or "timeout" in name or "timed out" in text
+
+
+def _http_timeout(total: float, *, read: float):
+    """Idle-read bound so a silent proxy cannot sit out the whole call timeout."""
+    total = max(0.05, float(total))
+    read = max(0.05, min(float(read), total))
+    try:
+        import httpx
+
+        return httpx.Timeout(
+            total, connect=min(5.0, total), read=read, write=min(5.0, total), pool=min(5.0, total)
+        )
+    except Exception:
+        return read
 
 
 class LLM:
@@ -101,11 +123,13 @@ class ChatLLM(LLM):
         self.json_mode = json_mode
         self._in_rate, self._out_rate = rates if rates is not None else _rates_for(model)
         self.timeout = float(os.environ.get("ADAGS_CALL_TIMEOUT", "45"))
+        self.think_timeout = float(os.environ.get("ADAGS_THINK_TIMEOUT", "12"))
+        self.first_token_timeout = float(os.environ.get("ADAGS_FIRST_TOKEN_TIMEOUT", "8"))
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             default_headers=extra_headers or None,
-            timeout=self.timeout,
+            timeout=_http_timeout(self.timeout, read=self.first_token_timeout),
             max_retries=0,
         )
 
@@ -163,7 +187,9 @@ class ChatLLM(LLM):
                 "model": self.model,
                 "messages": msgs,
                 "max_tokens": max_tokens,
-                "timeout": timeout,
+                "timeout": _http_timeout(
+                    timeout, read=float(getattr(self, "think_timeout", 12) or 12)
+                ),
             }
             if self.json_mode:
                 kwargs["response_format"] = {"type": "json_object"}
@@ -176,7 +202,7 @@ class ChatLLM(LLM):
                 return result
             except Exception as exc:
                 last_exc = exc
-                if isinstance(exc, TimeoutError) or time.monotonic() >= completion_deadline:
+                if _timeout_like(exc) or time.monotonic() >= completion_deadline:
                     break
                 if self.json_mode and not budgeted:
                     kwargs.pop("response_format", None)
@@ -204,10 +230,17 @@ class ChatLLM(LLM):
         content_parts: list[str] = []
         think_parts: list[str] = []
         inn = out = 0
+        started = time.monotonic()
+        first_token_at: float | None = None
+        speech_at: float | None = None
+        think_limit = float(getattr(self, "think_timeout", 12) or 0)
+        first_limit = float(getattr(self, "first_token_timeout", 8) or 0)
         deadline = deadline or min(
             time.monotonic() + self.timeout,
             self.deadline if self.deadline is not None else float("inf"),
         )
+        cut: str | None = None
+        stream = None
         try:
             with _interrupt_at(deadline):
                 try:
@@ -218,14 +251,29 @@ class ChatLLM(LLM):
                     )
                 except TypeError:
                     stream = self.client.chat.completions.create(**kwargs, stream=True)
+                if first_limit:
+                    _retarget_deadline(started + first_limit)
                 for event in stream:
+                    now = time.monotonic()
                     usage = getattr(event, "usage", None)
                     if usage:
                         inn = int(getattr(usage, "prompt_tokens", 0) or 0)
                         out = int(getattr(usage, "completion_tokens", 0) or 0)
                     if not event.choices:
+                        if first_token_at is None and first_limit and now - started >= first_limit:
+                            cut = "first_token"
+                            break
                         continue
                     content, think = _delta_parts(event.choices[0].delta)
+                    if think or content:
+                        if first_token_at is None:
+                            first_token_at = now
+                            if speech_at is None and think_limit:
+                                _retarget_deadline(started + think_limit)
+                    if content:
+                        if speech_at is None:
+                            speech_at = now
+                            _retarget_deadline(deadline)
                     if think:
                         think_parts.append(think)
                     if content:
@@ -238,16 +286,52 @@ class ChatLLM(LLM):
                             on_think(think)
                         if content and on_token:
                             on_token(content)
-        except TimeoutError:
+                    if speech_at is None and think_limit and now - started >= think_limit:
+                        cut = "think"
+                        break
+                    if first_token_at is None and first_limit and now - started >= first_limit:
+                        cut = "first_token"
+                        break
+        except Exception as exc:
+            if not (isinstance(exc, TimeoutError) or _timeout_like(exc)):
+                raise
+            text = "".join(content_parts) or "".join(think_parts)
+            if not content_parts and think_parts:
+                return LLMResult(
+                    text=text,
+                    input_tokens=inn,
+                    output_tokens=out,
+                    input_rate=self._in_rate,
+                    output_rate=self._out_rate,
+                    cut="think",
+                )
             return LLMResult(
-                text="".join(content_parts) or "".join(think_parts),
+                text=text,
                 input_tokens=inn,
                 output_tokens=out,
                 input_rate=self._in_rate,
                 output_rate=self._out_rate,
-                error=f"timeout after {self.timeout:.0f}s",
+                error=f"{type(exc).__name__}: {exc}"[:200],
+                cut=None if content_parts else "first_token",
             )
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
         text = "".join(content_parts) or "".join(think_parts)
+        if cut == "first_token" and not text.strip():
+            return LLMResult(
+                text="",
+                input_tokens=inn,
+                output_tokens=out,
+                input_rate=self._in_rate,
+                output_rate=self._out_rate,
+                error=f"no tokens after {first_limit:.0f}s",
+                cut=cut,
+            )
         if not text.strip():
             raise RuntimeError("empty stream")
         return LLMResult(
@@ -256,6 +340,7 @@ class ChatLLM(LLM):
             output_tokens=out,
             input_rate=self._in_rate,
             output_rate=self._out_rate,
+            cut=cut,
         )
 
 
@@ -280,6 +365,16 @@ def _interrupt_at(deadline: float):
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+
+
+def _retarget_deadline(when: float) -> None:
+    """Shorten the live SIGALRM so a hang after first think cannot sit out the full call."""
+    if threading.current_thread() is not threading.main_thread():
+        return
+    left = when - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("model stream stopped yielding before its deadline")
+    signal.setitimer(signal.ITIMER_REAL, left)
 
 
 def _delta_parts(delta: Any) -> tuple[str, str]:
@@ -388,8 +483,21 @@ def salvage_act(text: str) -> dict[str, Any]:
     ev = re.search(r'"vote_election"\s*:\s*"([a-z][a-z0-9_-]{0,31})"', text)
     if ev:
         act["vote_election"] = ev.group(1)
-    if re.search(r'"impeach"\s*:\s*true', text, re.I):
-        act["impeach"] = True
+    if not act.get("vote_election"):
+        spoken_vote = re.search(
+            r"\bvote\w*\s+for\s+([a-z][a-z0-9_-]{0,31})\b", text, re.I
+        )
+        if spoken_vote:
+            pick = as_member_id(spoken_vote.group(1))
+            if pick:
+                act["vote_election"] = pick
+    impeach = re.search(
+        r'"impeach"\s*:\s*(?:true|"(\d{3})"|(0|[1-9]\d{2,}))',
+        text,
+        re.I,
+    )
+    if impeach:
+        act["impeach"] = impeach.group(1) or impeach.group(2) or True
     vm = re.search(
         r'"vote_motion"\s*:\s*"(aye|nay|abstain|yes|no|yea|against)"',
         text,
@@ -433,6 +541,105 @@ _PLANNED_SPEECH = re.compile(
     r'(?:craft(?:ing)? speech|speech\s*(?:is|should be)?|chamber remarks)\s*[:\-]\s*"((?:\\.|[^"\\]){12,400})"',
     re.I,
 )
+
+
+def fulfill_speech(
+    act: dict[str, Any],
+    *,
+    member_id: str,
+    president: bool = False,
+) -> dict[str, Any]:
+    """Fill vote/nominate/party/exec when speech already announced them."""
+    speech = str(act.get("speech") or "")
+    if not speech:
+        return act
+    low = speech.lower()
+
+    if not act.get("nominate") and not re.search(
+        r"\b(decline to nominate|will not nominate|not nominate|no nomination)\b", low
+    ):
+        nom = re.search(
+            r"\bnominat(?:e|es|ed|ing)\s+(myself|me|[a-z][a-z0-9_-]{0,31})\b",
+            speech,
+            re.I,
+        )
+        if nom:
+            token = nom.group(1).lower()
+            who = member_id if token in {"myself", "me"} else token
+            if as_member_id(who):
+                act["nominate"] = {"member": who, "platform": speech[:240]}
+
+    if not act.get("vote_motion"):
+        vm = re.search(
+            r"\bvote\w*\s+(aye|yea|yes|nay|no|against|abstain)\b"
+            r"|\b(aye|nay)\s+on\b"
+            r"|\b(oppose|reject)\s+(?:the\s+)?(?:motion|bill|proposal)\b",
+            speech,
+            re.I,
+        )
+        if vm:
+            token = (vm.group(1) or vm.group(2) or vm.group(3) or "").lower()
+            act["vote_motion"] = {
+                "aye": "aye",
+                "yea": "aye",
+                "yes": "aye",
+                "nay": "nay",
+                "no": "nay",
+                "against": "nay",
+                "oppose": "nay",
+                "reject": "nay",
+                "abstain": "abstain",
+            }.get(token, token)
+
+    if not act.get("vote_election") and not re.search(
+        r"\b(will not vote|withhold|decline to vote|not vote for)\b", low
+    ):
+        ev = re.search(r"\bvote\w*\s+for\s+([a-z][a-z0-9_-]{0,31})\b", speech, re.I)
+        if ev:
+            pick = as_member_id(ev.group(1))
+            if pick:
+                act["vote_election"] = pick
+
+    if act.get("party") is None:
+        leave = re.search(r"\bleave\s+(?:my\s+)?party\b", speech, re.I)
+        join = re.search(
+            r"\b(?:join|found|form)\s+(?:the\s+)?([a-z][a-z0-9_-]{0,31})\s+party\b",
+            speech,
+            re.I,
+        )
+        if leave:
+            act["party"] = "none"
+        elif join:
+            act["party"] = join.group(1).lower()
+
+    if not as_impeach(act.get("impeach"))[0]:
+        future = re.search(
+            r"\b(?:will|going to)\s+impeach\b|\bimpeach(?:ing)?\s+next\b",
+            low,
+        )
+        if not future:
+            cited = re.search(
+                r"\b(?:impeach(?:e[ds]|ing)?|mark impeach)\b[\s\S]{0,80}?\b(\d{3})\b"
+                r"|\b(\d{3})\b[\s\S]{0,40}?\bimpeach",
+                speech,
+                re.I,
+            )
+            if cited:
+                art = cited.group(1) or cited.group(2)
+                if art and int(art) >= 200:
+                    act["impeach"] = art
+
+    if president and not act.get("executive"):
+        goal = re.search(
+            r"(?:set|enact|establish|declare)\s+(?:the\s+|a\s+|our\s+)?goal\b(?!s)\s*:?\s+(.+)",
+            speech,
+            re.I | re.S,
+        )
+        if goal:
+            text = " ".join(goal.group(1).split())[:800]
+            if text and not re.match(r"s\b", text):
+                act["executive"] = [{"type": "set_goal", "id": "speech-goal", "text": text}]
+    return act
 
 
 def planned_speech(text: str) -> str:

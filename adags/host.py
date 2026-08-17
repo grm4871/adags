@@ -7,13 +7,26 @@ import time
 from datetime import datetime
 from typing import Any
 
+from adags.brief import brief_every, maybe_clerk_brief
 from adags.citizens import citizen_act, clerk_compile, snapshot_user
-from adags.constitution import apply_to_runtime, value
-from adags.memory import append_record, compose_user, load_records, record_from_act
+from adags.constitution import apply_to_runtime, identical_charter_line, value
+from adags.memory import (
+    append_record,
+    compose_user,
+    format_record,
+    goal_clock,
+    load_records,
+    patch_last_record,
+    record_from_act,
+    workspace_card,
+)
 from adags.effects import (
     apply_effect,
     apply_inverse,
     coerce_effects,
+    bill_title,
+    complete_set_goal,
+    path_in_prose,
     propose_effects,
     render_goals,
 )
@@ -21,9 +34,10 @@ from adags.gov import (
     add_nominee,
     advance_phase,
     apply_party,
-    as_flag,
+    as_impeach,
     as_member_id,
     as_party_id,
+    consecutive_blocked,
     election_due,
     member_ids,
     passes,
@@ -196,6 +210,16 @@ def _format_election_votes(votes: dict[str, str]) -> str:
     return ", ".join(f"{who}→{pick}" for who, pick in votes.items())
 
 
+def _format_impeach_marks(votes: list[str], charges: dict[str, str]) -> str:
+    if not votes:
+        return "none"
+    bits = []
+    for mid in votes:
+        art = (charges or {}).get(mid)
+        bits.append(f"{mid} ({art})" if art else mid)
+    return ", ".join(bits)
+
+
 def _load_turn_progress(state: RunState, turn: int) -> dict:
     path = state.root / "turn_progress.json"
     if not path.exists():
@@ -214,6 +238,16 @@ def _clear_turn_progress(state: RunState) -> None:
     path = state.root / "turn_progress.json"
     if path.exists():
         path.unlink()
+
+
+def _motion_threshold(law: dict, motion: dict, gov: dict) -> str:
+    """Floor set_goal/write_workspace uses offices.president.override when set."""
+    override = value(law, "offices.president.override")
+    if override:
+        for fx in coerce_effects(motion.get("effects")):
+            if (fx or {}).get("type") in {"set_goal", "write_workspace"}:
+                return str(override)
+    return str(gov.get("vote_rule") or value(law, "motion.threshold", "majority"))
 
 
 def _enact_motion(state: RunState, llm: LLM, control: dict, motion: dict, votes: dict) -> list[str]:
@@ -292,20 +326,27 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
 
     turn = int(control["turn"])
     law = state.law()
-    gov = advance_phase(apply_to_runtime(state.gov(), law), turn)
+    motion = _open_motion(state)
+    gov = advance_phase(
+        apply_to_runtime(state.gov(), law),
+        turn,
+        motion_open=motion is not None,
+    )
     election_votes = _load_ballots(gov)
     gov["ballots"] = dict(election_votes)
     state.write_gov(gov)
     members = state.members()
     constitution = state.constitution()
     goals = state.goals()
-    motion = _open_motion(state)
     digest = state.last_digest()
     petitions = state.petitions()
+    clock = goal_clock(goals, state.workspace, turn)
+    identical = identical_charter_line(law)
 
     progress = _load_turn_progress(state, turn)
     speeches: list[str] = list(progress.get("speeches") or [])
     impeach_votes: list[str] = list(progress.get("impeach_votes") or [])
+    impeach_charges: dict[str, str] = dict(progress.get("impeach_charges") or {})
     exec_notes: list[str] = list(progress.get("exec_notes") or [])
     completed = set(progress.get("completed") or [])
     interrupted = False
@@ -323,6 +364,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             0.0,
             float(control["usd_cap"]) - float(control["usd_spent"]),
         )
+        prior = load_records(state.root, member["id"])
         snapshot = snapshot_user(
             member_id=member["id"],
             constitution=constitution,
@@ -333,6 +375,10 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             digest=digest,
             petitions=petitions,
             turn=turn,
+            workspace_md=workspace_card(state.workspace),
+            last_act_line=format_record(prior[-1]) if prior else "",
+            goal_clock=clock,
+            identical_line=identical,
         )
         user = compose_user(load_records(state.root, member["id"]), snapshot)
         citizen_open(member["id"], party=str(member.get("party") or "") or None)
@@ -377,7 +423,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             seated=member_ids(members),
             parties=member_parties(members),
         )
-        append_record(state.root, member["id"], record_from_act(turn, act))
+        host_bits: list[str] = []
 
         nom = act.get("nominate")
         if isinstance(nom, dict) and gov.get("election_phase") == "nominate":
@@ -398,15 +444,38 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_text(f"# Platform: {target}\n\n{plat}\n", encoding="utf-8")
                     speeches.append(f"- nominated {target}")
+                    host_bits.append(f"nominated {target}")
+                else:
+                    host_bits.append(str(updated))
+            else:
+                host_bits.append("nominate ignored (not seated)")
+        elif isinstance(nom, dict) and gov.get("election_phase") != "nominate":
+            host_bits.append(f"nominate ignored ({gov.get('election_phase')})")
 
         vote_e = as_member_id(act.get("vote_election"))
+        nominees = {n.get("member") for n in (gov.get("nominees") or [])}
+        blocked = consecutive_blocked(gov)
         if vote_e and gov.get("election_phase") == "ballot":
-            election_votes[member["id"]] = vote_e
-            gov["ballots"] = dict(election_votes)
-            state.write_gov(gov)
+            if blocked and vote_e == blocked:
+                host_bits.append(f"vote_election ignored ({vote_e} ineligible this election)")
+            elif vote_e in nominees:
+                election_votes[member["id"]] = vote_e
+                gov["ballots"] = dict(election_votes)
+                state.write_gov(gov)
+                host_bits.append(f"ballot {vote_e}")
+            else:
+                host_bits.append(f"vote_election ignored (not a nominee)")
+        elif vote_e:
+            host_bits.append(f"vote_election ignored ({gov.get('election_phase')})")
 
-        if as_flag(act.get("impeach")):
-            impeach_votes.append(member["id"])
+        marked, article = as_impeach(act.get("impeach"))
+        if marked and article:
+            if member["id"] not in impeach_votes:
+                impeach_votes.append(member["id"])
+            impeach_charges[member["id"]] = article
+            host_bits.append(f"impeach {article}")
+        elif marked:
+            host_bits.append("impeach ignored (cite an article)")
 
         if act.get("party") is not None:
             slug = as_party_id(act.get("party"))
@@ -422,17 +491,21 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             effects = propose_effects(prop)
             if isinstance(prop, dict) and (
                 prop.get("title") or prop.get("text") or prop.get("effects") or effects
+            ) and gov.get("election_phase") in {"nominate", "ballot"}:
+                host_bits.append(
+                    f"propose ignored ({gov.get('election_phase')} — finish the election)"
+                )
+            elif isinstance(prop, dict) and (
+                prop.get("title") or prop.get("text") or prop.get("effects") or effects
             ):
                 if not effects:
                     effects = list(prop.get("effects") or [])
-                title = str(prop.get("title") or "").strip()
-                if not title or title.lower() == "untitled":
-                    for fx in effects:
-                        if isinstance(fx, dict) and fx.get("type") == "add_member" and fx.get("id"):
-                            title = f"Admit {fx['id']}"
-                            break
-                    else:
-                        title = title or "untitled"
+                title = bill_title(
+                    title=str(prop.get("title") or ""),
+                    text=str(prop.get("text") or ""),
+                    effects=effects,
+                    speech=str(act.get("speech") or ""),
+                )
                 motion = {
                     "id": f"m{turn}-{member['id']}",
                     "title": title,
@@ -446,6 +519,13 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     emit(line)
                 for line in wrap_field("votes", format_votes(motion.get("votes"), member_parties(members))):
                     emit(line)
+                if effects:
+                    host_bits.append(f"opened {motion['id']}")
+                else:
+                    host_bits.append(
+                        f"opened {motion['id']} with no structured effects — "
+                        "prose is not law; amend_rule needs a mechanics object"
+                    )
         else:
             vm = as_ballot(act.get("vote_motion"))
             if vm:
@@ -453,11 +533,23 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 _write_open_motion(state, motion)
                 for line in wrap_field("votes", format_votes(motion.get("votes"), member_parties(members))):
                     emit(line)
+                host_bits.append(f"{vm} on {motion.get('id')}")
 
         exec_fx = coerce_effects(act.get("executive"))
         for key in ("set_goal", "write_workspace"):
             if act.get(key) is not None:
                 exec_fx.extend(coerce_effects({key: act[key]}))
+        spoken = str(act.get("speech") or "")
+        for fx in exec_fx:
+            if not isinstance(fx, dict):
+                continue
+            if fx.get("type") == "set_goal":
+                complete_set_goal(fx, speech=spoken)
+            elif fx.get("type") == "write_workspace":
+                if not fx.get("path") or fx.get("path") == "design-log.md":
+                    found = path_in_prose(spoken)
+                    if found:
+                        fx["path"] = found
         if exec_fx:
             allowed = []
             for fx in exec_fx:
@@ -467,6 +559,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     allowed.append(fx)
                 else:
                     exec_notes.append(f"{member['id']} executive {kind} dropped (no privilege)")
+                    host_bits.append(f"{kind} dropped (no privilege)")
             if allowed:
                 notes = _apply_many(
                     state,
@@ -476,6 +569,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     act_id=f"t{turn}-{member['id']}-exec",
                 )
                 exec_notes.extend(notes)
+                host_bits.extend(str(n) for n in notes if n)
                 # refresh after executive
                 gov = apply_to_runtime(state.gov(), state.law())
                 state.write_gov(gov)
@@ -483,12 +577,18 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 constitution = state.constitution()
                 goals = state.goals()
 
+        rec = record_from_act(turn, act)
+        if host_bits:
+            rec["host"] = "; ".join(host_bits)[:360]
+        append_record(state.root, member["id"], rec)
+
         completed.add(member["id"])
         progress.update(
             {
                 "completed": sorted(completed),
                 "speeches": speeches,
                 "impeach_votes": impeach_votes,
+                "impeach_charges": impeach_charges,
                 "exec_notes": exec_notes,
             }
         )
@@ -513,6 +613,9 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     if gov.get("election_phase") == "ballot":
         winner = plurality_winner(election_votes, gov.get("nominees") or [])
         quorum = threshold(value(state.law(), "election.quorum", "majority"), n)
+        blocked = consecutive_blocked(gov)
+        if winner and blocked and winner == blocked:
+            winner = None
         if winner and len(election_votes) >= quorum:
             gov = seat_president(gov, winner, turn)
             state.write_gov(gov)
@@ -524,14 +627,15 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         votes = motion.get("votes") or {}
         ayes = sum(1 for v in votes.values() if v == "aye")
         decisive = value(state.law(), "motion.resolve_when", "decisive") == "decisive"
-        decided = set(votes) >= set(member_ids(state.members())) or (decisive and ayes >= threshold(
-            gov.get("vote_rule") or "majority", n
-        ))
+        rule = _motion_threshold(state.law(), motion, gov)
+        decided = set(votes) >= set(member_ids(state.members())) or (
+            decisive and ayes >= threshold(rule, n)
+        )
         # resolve if everyone voted, or enough ayes, or enough nays to make pass impossible
         nays = sum(1 for v in votes.values() if v == "nay")
-        need = threshold(gov.get("vote_rule") or "majority", n)
+        need = threshold(rule, n)
         if decided or (decisive and nays > n - need):
-            passed = passes(ayes, n, gov.get("vote_rule") or "majority")
+            passed = passes(ayes, n, rule)
             if passed:
                 motion_notes.extend(
                     _enact_motion(state, llm, control, motion, votes)
@@ -540,6 +644,16 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 motion_notes.append("motion failed")
             closed = state.root / "motions" / f"{motion['id']}.json"
             closed.write_text(json.dumps({**motion, "passed": passed}, indent=2) + "\n", encoding="utf-8")
+            proposer = str(motion.get("proposer") or "")
+            if proposer:
+                result = "passed" if passed else "failed"
+                detail = "; ".join(str(n) for n in motion_notes if n) or result
+                patch_last_record(
+                    state.root,
+                    proposer,
+                    turn,
+                    host=f"bill {result} {ayes}-{nays}: {detail}",
+                )
             _write_open_motion(state, None)
             motion = None
 
@@ -552,7 +666,8 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         "## Speech",
         *speeches,
         "",
-        f"Impeach marks: {impeach_votes or 'none'}" + (" — VACATED" if impeached else ""),
+        f"Impeach marks: {_format_impeach_marks(impeach_votes, impeach_charges)}"
+        + (" — VACATED" if impeached else ""),
         f"Election votes: {_format_election_votes(election_votes)}"
         + (
             f" — seated {seated}"
@@ -568,7 +683,15 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         "## Motion",
         *(motion_notes or [("(open) " + motion["title"]) if motion else "(none)"]),
     ]
-    digest_text = "\n".join(digest_lines) + "\n"
+    mechanical = "\n".join(digest_lines) + "\n"
+    brief = maybe_clerk_brief(state, turn=turn, mechanical=mechanical)
+    digest_text = mechanical
+    if brief:
+        start = max(1, int(turn) - max(brief_every(), 1) + 1)
+        digest_text = (
+            f"# Clerk brief (turns {start}–{turn})\n\n{brief}\n\n---\n\n{mechanical}"
+        )
+        mechanical = digest_text
     state.write_digest(digest_text)
     state.append_journal(f"\n## Turn {turn}\n\n{digest_text}")
 

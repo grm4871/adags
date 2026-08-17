@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from adags.constitution import default_constitution, render
+from adags.constitution import default_constitution, ensure_charter, render
 from adags.effects import parse_goals, render_goals
 from adags.seed import (
     FOUNDING_MEMBERS,
@@ -42,7 +42,13 @@ class RunState:
     def law(self) -> dict:
         path = self.path("constitution.json")
         if path.exists():
-            return self.load_json("constitution.json")
+            law = self.load_json("constitution.json")
+            if not isinstance(law, dict):
+                law = default_constitution()
+            if not law.get("charter"):
+                law = ensure_charter(law)
+                self.write_law(law)
+            return law
         law = default_constitution()
         # One-time migration for runs created before executable constitutions.
         if self.path("gov.json").exists():
@@ -56,7 +62,7 @@ class RunState:
                 {
                     "election.enabled": gov.get("election_enabled", True),
                     "election.method": gov.get("election_rule", "plurality"),
-                    "election.term_length": gov.get("term_length", 4),
+                    "election.term_length": gov.get("term_length", 8),
                 }
             )
             law["rules"]["209"]["mechanics"]["impeachment.threshold"] = gov.get(

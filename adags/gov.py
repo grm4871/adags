@@ -27,7 +27,7 @@ def is_member_id(value: str) -> bool:
 
 
 _MEMBER_IN_BLOB = re.compile(
-    r"(?:member|id|vote|candidate|choice)['\"]?\s*[:=]\s*['\"]([a-z][a-z0-9_-]{0,31})['\"]",
+    r"(?:member|id|vote|candidate|choice|nominee|nominated|target|pick|successor)['\"]?\s*[:=]\s*['\"]([a-z][a-z0-9_-]{0,31})['\"]",
     re.I,
 )
 
@@ -46,6 +46,21 @@ def as_member_id(value: Any) -> str | None:
             "null",
             "true",
             "false",
+            "a",
+            "an",
+            "any",
+            "anyone",
+            "someone",
+            "phase",
+            "idle",
+            "ballot",
+            "election",
+            "nominate",
+            "nominee",
+            "member",
+            "candidate",
+            "president",
+            "self",
         }:
             return None
         if is_member_id(text):
@@ -55,7 +70,21 @@ def as_member_id(value: Any) -> str | None:
             return found.group(1)
         return None
     if isinstance(value, dict):
-        for key in ("member", "id", "vote", "vote_election", "candidate", "choice"):
+        for key in (
+            "member",
+            "id",
+            "vote",
+            "vote_election",
+            "candidate",
+            "choice",
+            "nominee",
+            "nominated",
+            "target",
+            "pick",
+            "successor",
+            "for",
+            "name",
+        ):
             got = as_member_id(value.get(key))
             if got:
                 return got
@@ -105,11 +134,41 @@ def apply_party(members: list[dict], member_id: str, party: str) -> list[dict]:
 
 def as_flag(value: Any) -> bool:
     """True only for real impeach/yes marks. The string 'false' is false."""
+    marked, _ = as_impeach(value)
+    return marked
+
+
+def as_impeach(value: Any) -> tuple[bool, str | None]:
+    """Impeach mark plus optional chamber/host article id."""
     if value is True or value == 1:
-        return True
-    if isinstance(value, str) and value.strip().lower() in {"true", "yes", "impeach"}:
-        return True
-    return False
+        return True, None
+    if value is False or value is None or value == 0:
+        return False, None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        n = int(value)
+        if n >= 200:
+            return True, f"{n:03d}"
+        return bool(n), None
+    if isinstance(value, str):
+        text = value.strip()
+        low = text.lower()
+        if low in {"false", "no", "none", "null", ""}:
+            return False, None
+        if low in {"true", "yes", "impeach"}:
+            return True, None
+        found = re.search(r"(\d{3})", text)
+        if found and int(found.group(1)) >= 200:
+            return True, found.group(1)
+        return False, None
+    if isinstance(value, dict):
+        for key in ("article", "id", "rule", "charge", "cite"):
+            if value.get(key) is not None:
+                marked, art = as_impeach(value.get(key))
+                if marked:
+                    return True, art
+        if value.get("impeach") not in (None, value):
+            return as_impeach(value.get("impeach"))
+    return False, None
 
 
 def threshold(rule: str, n: int) -> int:
@@ -141,7 +200,7 @@ def term_expired(gov: dict, turn: int) -> bool:
     if not off or not off.get("holder"):
         return False
     start = off.get("term_start")
-    length = int(gov.get("term_length") or 4)
+    length = int(gov.get("term_length") or 8)
     if start is None:
         return True
     return turn >= int(start) + length
@@ -160,8 +219,12 @@ def election_due(gov: dict, turn: int) -> bool:
     return president_vacant(gov) or term_expired(gov, turn)
 
 
-def advance_phase(gov: dict, turn: int) -> dict:
-    """Return a new gov with election_phase updated at the start of a turn."""
+def advance_phase(gov: dict, turn: int, *, motion_open: bool = False) -> dict:
+    """Return a new gov with election_phase updated at the start of a turn.
+
+    An open motion keeps an idle chamber idle so the bill finishes before
+    nominations. Nominate/ballot already in progress still run.
+    """
     g = deepcopy(gov)
     if not g.get("election_enabled", True) or office(g) is None:
         g["election_phase"] = "idle"
@@ -169,6 +232,9 @@ def advance_phase(gov: dict, turn: int) -> dict:
     phase = g.get("election_phase") or "idle"
     due = election_due(g, turn)
     if not due:
+        g["election_phase"] = "idle"
+        return g
+    if motion_open and phase == "idle":
         g["election_phase"] = "idle"
         return g
     if phase == "idle":
@@ -186,12 +252,29 @@ def advance_phase(gov: dict, turn: int) -> dict:
         g["election_phase"] = "ballot"
     return g
 
+def consecutive_blocked(gov: dict) -> str | None:
+    """Sitting President who may not succeed themselves, or None."""
+    limit = gov.get("consecutive_limit", 1)
+    if limit is None:
+        return None
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return None
+    if limit < 1:
+        return None
+    return president_id(gov)
+
+
 def add_nominee(gov: dict, *, member: str, platform: str, nominator: str, turn: int) -> dict | str:
     g = deepcopy(gov)
     if g.get("election_phase") != "nominate":
         return "nominations are not open"
     if not is_member_id(member):
         return "invalid member id"
+    blocked = consecutive_blocked(g)
+    if blocked and member == blocked:
+        return f"{member} is ineligible this election (consecutive term)"
     existing = {n["member"] for n in g.get("nominees") or []}
     if member in existing:
         return "already nominated"

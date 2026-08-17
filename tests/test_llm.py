@@ -120,8 +120,105 @@ def test_blocked_stream_is_interrupted_and_partial_output_survives():
     started = time.monotonic()
     result = llm.complete(system="s", user="u")
     assert time.monotonic() - started < 0.5
-    assert result.error == "timeout after 0s"
+    assert result.error
+    assert "timeout" in result.error.lower() or "deadline" in result.error.lower()
     assert result.text.endswith('{"speech":"hi')
+
+
+def test_think_budget_cuts_planning_and_keeps_partial_text():
+    from types import SimpleNamespace
+
+    from adags.llm import ChatLLM
+
+    class ThinkForever:
+        def __iter__(self):
+            for i in range(50):
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content="",
+                                reasoning=f"plan {i} ",
+                                reasoning_content=None,
+                                model_extra={},
+                            )
+                        )
+                    ],
+                )
+                time.sleep(0.02)
+
+        def close(self):
+            self.closed = True
+
+    class Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return ThinkForever()
+
+    llm = ChatLLM.__new__(ChatLLM)
+    llm.model = "free"
+    llm.json_mode = False
+    llm.timeout = 5
+    llm.think_timeout = 0.08
+    llm.first_token_timeout = 2
+    llm.deadline = None
+    llm.remaining_usd = None
+    llm._in_rate = 0
+    llm._out_rate = 0
+    llm.client = Client()
+    started = time.monotonic()
+    result = llm.complete(system="s", user="u")
+    assert time.monotonic() - started < 1.0
+    assert result.cut == "think"
+    assert result.error is None
+    assert "plan" in result.text
+
+
+def test_speech_is_not_cut_by_think_budget():
+    from types import SimpleNamespace
+
+    from adags.llm import ChatLLM
+
+    class Speaks:
+        def __iter__(self):
+            yield SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content='{"speech":"aye"}',
+                            reasoning="",
+                            reasoning_content=None,
+                            model_extra={},
+                        )
+                    )
+                ],
+            )
+
+    class Client:
+        class chat:
+            class completions:
+                @staticmethod
+                def create(**kwargs):
+                    return Speaks()
+
+    llm = ChatLLM.__new__(ChatLLM)
+    llm.model = "free"
+    llm.json_mode = False
+    llm.timeout = 5
+    llm.think_timeout = 0.001
+    llm.first_token_timeout = 2
+    llm.deadline = None
+    llm.remaining_usd = None
+    llm._in_rate = 0
+    llm._out_rate = 0
+    llm.client = Client()
+    result = llm.complete(system="s", user="u")
+    assert result.cut is None
+    assert "aye" in result.text
 
 
 def test_delta_parts_does_not_double_identical_streams():
@@ -251,22 +348,103 @@ def test_citizen_repairs_empty_first_call():
     assert act["vote_election"] == "continuity"
 
 
-def test_citizen_repairs_speech_only_instead_of_inferring_an_act():
+def test_citizen_infers_announced_vote_without_a_second_call():
     from adags.citizens import citizen_act
     from adags.llm import ScriptedLLM
     from adags.seed import FOUNDING_MEMBERS
 
     speech_only = {"speech": "I vote for continuity.", "vote_election": None}
-    repaired = {"speech": "I vote for continuity.", "vote_election": "continuity"}
-    llm = ScriptedLLM(scripts=[speech_only, repaired])
+    llm = ScriptedLLM(scripts=[speech_only])
     act = citizen_act(
         llm,
         member=FOUNDING_MEMBERS[0],
         user="ballot",
         required="vote_election",
     )
-    assert llm.i == 2
+    assert llm.i == 1
     assert act["vote_election"] == "continuity"
+
+
+def test_missing_motion_ballot_abstains_instead_of_stalling():
+    from adags.citizens import citizen_act
+    from adags.llm import ScriptedLLM
+    from adags.seed import FOUNDING_MEMBERS
+
+    llm = ScriptedLLM(
+        scripts=[
+            {
+                "speech": "",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": None,
+            }
+        ]
+    )
+    act = citizen_act(
+        llm,
+        member=FOUNDING_MEMBERS[0],
+        user="motion",
+        required="vote_motion",
+    )
+    assert act["vote_motion"] == "abstain"
+
+
+def test_fulfill_speech_turns_talk_into_votes():
+    from adags.llm import fulfill_speech
+
+    nay = fulfill_speech(
+        {"speech": "I vote no on the motion to admit picker.", "vote_motion": None},
+        member_id="skeptic",
+    )
+    assert nay["vote_motion"] == "nay"
+    nom = fulfill_speech(
+        {"speech": "I nominate myself.", "nominate": None},
+        member_id="continuity",
+    )
+    assert nom["nominate"]["member"] == "continuity"
+    not_phase = fulfill_speech(
+        {"speech": "We are in the nominate phase.", "nominate": None},
+        member_id="continuity",
+    )
+    assert not not_phase.get("nominate")
+    not_any = fulfill_speech(
+        {"speech": "I vote for any.", "vote_election": None},
+        member_id="skeptic",
+    )
+    assert not not_any.get("vote_election")
+    graffiti = fulfill_speech(
+        {
+            "speech": (
+                "I vote no on m61-restraint to preserve the President's "
+                "constitutional authority to set goals and write the workspace, "
+                "ensuring stable governance."
+            ),
+            "executive": None,
+        },
+        member_id="continuity",
+        president=True,
+    )
+    assert not graffiti.get("executive")
+    explicit = fulfill_speech(
+        {"speech": "I set goal open participation and write a log.", "executive": None},
+        member_id="continuity",
+        president=True,
+    )
+    assert explicit["executive"][0]["type"] == "set_goal"
+    assert "open participation" in explicit["executive"][0]["text"]
+    cited = fulfill_speech(
+        {"speech": "I impeach the President under 303.", "impeach": False},
+        member_id="skeptic",
+    )
+    assert cited["impeach"] == "303"
+    threat = fulfill_speech(
+        {"speech": "I will impeach next turn under 303.", "impeach": False},
+        member_id="skeptic",
+    )
+    assert not threat.get("impeach")
 
 
 def test_growing_speech_ignores_protocol_notes():
@@ -460,6 +638,8 @@ def test_interior_law_drops_100_series():
     text = _interior_law(CONSTITUTION)
     assert "208." in text
     assert "101." not in text
+    assert "Chamber law" in text
+    assert "301." in text
 
 
 def test_snapshot_is_short():
@@ -480,6 +660,8 @@ def test_snapshot_is_short():
     assert "offices:" not in user
     assert "JSON only" in user
     assert "HOST: this is a live ballot" not in user
+    assert "Last time you acted:" in user
+    assert "Workspace:" in user
     assert len(user) < len(CONSTITUTION) + 4000
 
 
@@ -531,6 +713,64 @@ def test_snapshot_idle_says_election_over():
     assert "continuity is President" in user
     assert "nominate and vote_election do nothing" in user
     assert "Goals are empty" in user
+    assert "impeach with a cited article" in user
+
+
+def test_snapshot_idle_shows_goal_clock_and_waits_on_motion():
+    gov = default_gov()
+    gov["election_phase"] = "idle"
+    gov["offices"]["president"]["holder"] = "continuity"
+    gov["offices"]["president"]["term_start"] = 1
+    user = snapshot_user(
+        member_id="ambition",
+        constitution=CONSTITUTION,
+        gov=gov,
+        members=FOUNDING_MEMBERS,
+        goals_md="# Goals\n\n## g1\nKeep a civic journal until turn 12.\n",
+        open_motion={"id": "m4-builder", "title": "Still open", "text": "x", "effects": [], "votes": {}},
+        digest="",
+        petitions=[],
+        turn=9,
+        goal_clock="g1 overdue 1/3 files, due turn 4",
+    )
+    assert "Goals: g1 overdue 1/3 files, due turn 4" in user
+    assert "An election is due; it waits until this motion closes." in user
+
+
+def test_snapshot_reports_identical_articles():
+    user = snapshot_user(
+        member_id="ambition",
+        constitution=CONSTITUTION,
+        gov=default_gov(),
+        members=FOUNDING_MEMBERS,
+        goals_md="# Goals\n\n## g1\nKeep a civic journal.\n",
+        open_motion=None,
+        digest="",
+        petitions=[],
+        turn=3,
+        identical_line="302 = 304 = 305 (identical text)",
+    )
+    assert "HOST: 302 = 304 = 305 (identical text)." in user
+
+
+def test_wrap_field_keeps_party_chips_intact(monkeypatch):
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    from adags.render import format_roster, visible_width, wrap_field
+
+    roster = {
+        "builder": ["ambition"],
+        "builder_caucus": ["builder"],
+        "continuity_caucus": ["continuity"],
+    }
+    lines = wrap_field("parties", format_roster(roster), width=48, atom="; ")
+    assert lines[0].startswith("  parties")
+    joined = "\n".join(lines)
+    assert joined.count("●") == 3
+    assert not joined.splitlines()[0].rstrip().endswith("●")
+    hang = visible_width(f"{'':2}{'parties':<9} ")
+    for line in lines[1:]:
+        assert visible_width(line) - visible_width(line.lstrip()) == hang
 
 
 def test_party_colors_are_stable_and_split():
