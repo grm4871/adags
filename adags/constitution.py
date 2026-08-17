@@ -84,7 +84,10 @@ def default_constitution() -> dict:
 
 def mechanics(law: dict) -> dict[str, Any]:
     out: dict[str, Any] = {}
-    for rule in (law.get("rules") or {}).values():
+    rules = law.get("rules") or {}
+    # Later numbered law overrides earlier law using the same published mechanic.
+    for rid in sorted(rules, key=int):
+        rule = rules[rid]
         out.update(rule.get("mechanics") or {})
     return out
 
@@ -102,9 +105,6 @@ def apply_to_runtime(gov: dict, law: dict) -> dict:
     out["impeach_threshold"] = value(law, "impeachment.threshold", "majority")
     out["election_enabled"] = value(law, "election.enabled", True)
     out["max_members"] = value(law, "membership.max_members")
-    out.setdefault("offices", {}).setdefault("president", {})["privileges"] = value(
-        law, "offices.president.privileges", []
-    )
     return out
 
 

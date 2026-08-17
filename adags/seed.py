@@ -80,7 +80,6 @@ def default_gov() -> dict:
             "president": {
                 "holder": None,
                 "term_start": None,
-                "privileges": ["write_workspace", "set_goal"],
             }
         },
     }

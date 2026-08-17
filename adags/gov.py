@@ -1,4 +1,4 @@
-"""Mechanical interior law: votes, terms, privileges, elections."""
+"""Transient vote, term, and election state."""
 
 from __future__ import annotations
 
@@ -134,24 +134,6 @@ def president_id(gov: dict) -> str | None:
     return off.get("holder")
 
 
-def who_may(gov: dict, effect_type: str, members: list[dict]) -> set[str]:
-    """If any office lists this effect as a privilege, only those holders may do it."""
-    gated: set[str] = set()
-    any_gate = False
-    for off in (gov.get("offices") or {}).values():
-        privs = off.get("privileges") or []
-        if effect_type in privs:
-            any_gate = True
-            holder = off.get("holder")
-            if holder:
-                gated.add(holder)
-    if not any_gate:
-        return set(member_ids(members))
-    return gated
-
-
-def may_execute(gov: dict, actor: str, effect_type: str, members: list[dict]) -> bool:
-    return actor in who_may(gov, effect_type, members)
 
 
 def term_expired(gov: dict, turn: int) -> bool:

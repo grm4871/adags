@@ -232,7 +232,7 @@ def test_ballots_persist_across_turns(tmp_path):
                 {
                     "speech": f"{mid}.",
                     "nominate": None,
-                    "vote_election": {"member": pick} if pick else None,
+                    "vote_election": {"member": pick} if pick else "abstain",
                     "impeach": False,
                     "propose": None,
                     "vote_motion": None,

@@ -24,7 +24,7 @@ If speech nominates, votes, or proposes, the matching field must be filled. Talk
 - If a motion is open: vote_motion aye|nay|abstain. Do not propose another.
 - If none is open and you want a law: propose with effects. Do not only describe it.
 - executive: President only. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact. Voting a membership bill is not using office.
-- Motions may use: amend_rule (200+ with text and a validated mechanics object), repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op. Not set_goal or write_workspace — those are presidential.
+- Motions may use: amend_rule (200+ with text and a validated mechanics object), repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op. set_goal and write_workspace are floor effects only if current law does not reserve them as presidential privileges.
 - Executable amendment mechanics are shown in the constitution. Unsupported mechanics and prose-only amendments are nonbinding.
 - If the host lacks a mechanic you want, use suggest_host_change with title and text. It enters the operator's suggestion box and never changes law by itself.
 - Do not propose add_member while goals are none. Impeach a President who leaves goals empty.
@@ -241,17 +241,17 @@ def _parse_act(text: str) -> tuple[dict[str, Any], str | None]:
         return salvage_act(text), str(exc)
 
 
-def _usable_act(data: dict[str, Any]) -> bool:
-    speech = str(data.get("speech") or "").strip()
-    if speech and not _protocol_speech(speech):
-        return True
-    return bool(
+def _usable_act(data: dict[str, Any], required: str | None = None) -> bool:
+    if required:
+        return bool(data.get(required))
+    return bool(str(data.get("speech") or "").strip()) or bool(
         data.get("nominate")
         or data.get("vote_election")
         or data.get("impeach")
         or data.get("propose")
         or data.get("vote_motion")
         or data.get("executive")
+        or data.get("party") is not None
     )
 
 
@@ -278,6 +278,7 @@ def citizen_act(
     president: bool = False,
     members: list[dict] | None = None,
     goals_empty: bool = False,
+    required: str | None = None,
 ) -> dict[str, Any]:
     system = CITIZEN_SYSTEM.format(
         member_id=member["id"],
@@ -288,16 +289,17 @@ def citizen_act(
         system=system, user=user, on_token=on_token, on_think=on_think, prefix=ACT_PREFIX
     )
     data, parse_error = _parse_act(raw.text)
-    if not _usable_act(data) and not raw.error:
+    if not _usable_act(data, required) and not raw.error:
+        requirement = f" Fill `{required}` with a real structured act." if required else " Fill one structured action field."
         raw2 = llm.complete(
             system=system,
-            user=user.rstrip() + "\n\n" + _REPAIR_USER,
+            user=user.rstrip() + "\n\n" + _REPAIR_USER + requirement,
             on_token=on_token,
             on_think=on_think,
             prefix=ACT_PREFIX,
         )
         data2, parse2 = _parse_act(raw2.text)
-        if _usable_act(data2):
+        if _usable_act(data2, required):
             raw = raw2
             data = data2
             parse_error = parse2

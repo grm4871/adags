@@ -215,6 +215,24 @@ def test_citizen_repairs_empty_first_call():
     assert act["vote_election"] == "continuity"
 
 
+def test_citizen_repairs_speech_only_instead_of_inferring_an_act():
+    from adags.citizens import citizen_act
+    from adags.llm import ScriptedLLM
+    from adags.seed import FOUNDING_MEMBERS
+
+    speech_only = {"speech": "I vote for continuity.", "vote_election": None}
+    repaired = {"speech": "I vote for continuity.", "vote_election": "continuity"}
+    llm = ScriptedLLM(scripts=[speech_only, repaired])
+    act = citizen_act(
+        llm,
+        member=FOUNDING_MEMBERS[0],
+        user="ballot",
+        required="vote_election",
+    )
+    assert llm.i == 2
+    assert act["vote_election"] == "continuity"
+
+
 def test_growing_speech_ignores_protocol_notes():
     from adags.llm import growing_speech
 

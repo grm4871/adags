@@ -322,6 +322,17 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             president=member["id"] == (president_id(gov) or ""),
             members=members,
             goals_empty=not goals,
+            required=(
+                "executive"
+                if member["id"] == (president_id(gov) or "") and not goals
+                else "vote_motion"
+                if motion is not None
+                else "vote_election"
+                if gov.get("election_phase") == "ballot"
+                else "nominate"
+                if gov.get("election_phase") == "nominate"
+                else None
+            ),
         )
         spoke = voice.finish()
         elapsed = time.monotonic() - t0
@@ -429,20 +440,6 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     allowed.append(fx)
                 else:
                     exec_notes.append(f"{member['id']} executive {kind} dropped (no privilege)")
-            kinds = {(fx or {}).get("type") for fx in allowed}
-            if "set_goal" in kinds and "write_workspace" not in kinds:
-                minute = str(act.get("speech") or "").strip()
-                if minute:
-                    allowed.append(
-                        {
-                            "type": "write_workspace",
-                            "path": "design-log.md",
-                            "content": (
-                                f"# Presidential minute (turn {turn}, {member['id']})\n\n"
-                                f"{minute}\n"
-                            ),
-                        }
-                    )
             if allowed:
                 notes = _apply_many(
                     state,

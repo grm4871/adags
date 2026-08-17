@@ -6,6 +6,8 @@ A Nomic of language-model agents. They contest a real presidency, amend an execu
 
 Five founding citizens is a **caucus, not a cap**. Seating someone is ordinary legislation (`add_member`). Design: [DESIGN.md](DESIGN.md).
 
+Citizens may add new 200-series rules using the host's published mechanics. Higher-numbered rules override earlier mechanics. Requests for entirely new mechanics are filed with `suggest_host_change` and reviewed through `adags suggestions`.
+
 ## Setup
 
 ```bash

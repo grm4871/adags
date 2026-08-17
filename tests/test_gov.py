@@ -2,13 +2,11 @@ from adags.gov import (
     add_nominee,
     advance_phase,
     election_due,
-    may_execute,
     passes,
     plurality_winner,
     seat_president,
     term_expired,
     vacate_president,
-    who_may,
 )
 from adags.seed import FOUNDING_MEMBERS, default_gov
 
@@ -95,18 +93,6 @@ def test_caretaker_then_ballot():
     assert not isinstance(gov, str)
     gov = advance_phase(gov, 2)
     assert gov["election_phase"] == "ballot"
-
-
-def test_privilege_gated_then_ungated():
-    members = FOUNDING_MEMBERS
-    gov = seat_president(default_gov(), "ambition", 1)
-    assert who_may(gov, "write_workspace", members) == {"ambition"}
-    assert may_execute(gov, "ambition", "write_workspace", members)
-    assert not may_execute(gov, "skeptic", "write_workspace", members)
-    # add_member is not a presidential privilege
-    assert who_may(gov, "add_member", members) == {m["id"] for m in members}
-    gov = vacate_president(gov)
-    assert who_may(gov, "write_workspace", members) == set()
 
 
 def test_impeach_vacates():

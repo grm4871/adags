@@ -119,6 +119,22 @@ def test_can_amend_200_series(tmp_path):
     assert inv["type"] == "_restore_rule"
 
 
+def test_newer_rule_can_override_a_published_mechanic(tmp_path):
+    from adags.constitution import value
+
+    r, _ = _apply(
+        {
+            "type": "amend_rule",
+            "id": "213",
+            "text": "Motions require two thirds.",
+            "mechanics": {"motion.threshold": "two_thirds"},
+        },
+        tmp_path,
+    )
+    assert r["ok"]
+    assert value(r["law"], "motion.threshold") == "two_thirds"
+
+
 def test_prose_only_amendment_is_not_law(tmp_path):
     r, inv = _apply({"type": "amend_rule", "id": "201", "text": "Unanimity."}, tmp_path)
     assert not r["ok"]
@@ -184,8 +200,8 @@ def test_set_goal_executive_is_president_only(tmp_path):
         actor="skeptic",
         source="motion",
     )
-    assert r["ok"]
-    assert r["goals"]["g2"] == "Floor-enacted goal."
+    assert not r["ok"]
+    assert "reserved to the President" in r["note"]
 
 
 def test_removing_executive_privilege_disables_effect(tmp_path):
@@ -202,6 +218,15 @@ def test_removing_executive_privilege_disables_effect(tmp_path):
         source="executive",
     )
     assert not r["ok"]
+    floor, _ = _apply(
+        {"type": "set_goal", "id": "g1", "text": "Now enacted by the floor."},
+        tmp_path,
+        law=law,
+        gov=gov,
+        actor="skeptic",
+        source="motion",
+    )
+    assert floor["ok"]
 
 
 def test_unsupported_mechanic_is_rejected(tmp_path):

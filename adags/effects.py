@@ -149,12 +149,14 @@ def apply_effect(
     if source == "executive" and kind not in EXECUTIVE_TYPES:
         return {"ok": False, "note": f"{kind} is not an executive effect"}, None
 
-    if kind in EXECUTIVE_TYPES and source == "executive":
+    if kind in EXECUTIVE_TYPES:
         holder = (office(gov) or {}).get("holder")
         privileges = value(law, "offices.president.privileges", [])
         holders = {holder} if holder and kind in privileges else set()
-        if actor not in holders:
+        if source == "executive" and actor not in holders:
             return {"ok": False, "note": f"{kind} requires office privilege (holders: {sorted(holders)})"}, None
+        if source == "motion" and kind in privileges:
+            return {"ok": False, "note": f"{kind} is reserved to the President"}, None
 
     if source == "motion" and kind == "appoint" and value(law, "election.enabled", True) and effect.get("office", "president") == "president":
         return {"ok": False, "note": "appoint president is inert while election_enabled"}, None
@@ -186,8 +188,9 @@ def apply_effect(
 def _amend_rule(effect: dict, law: dict) -> tuple[dict, dict | None]:
     rid = str(effect.get("id") or "").strip()
     text = str(effect.get("text") or effect.get("value") or "").strip()
-    if not rid or _rule_num(rid) is None:
-        return {"ok": False, "note": "amend_rule needs a numeric rule id"}, None
+    number = _rule_num(rid) if rid else None
+    if number is None or number < 200:
+        return {"ok": False, "note": "amend_rule needs a 200-series numeric rule id"}, None
     if _is_immutable(rid):
         return {"ok": False, "note": f"cannot amend immutable rule {rid}"}, None
     mechanics = effect.get("mechanics")
@@ -198,9 +201,6 @@ def _amend_rule(effect: dict, law: dict) -> tuple[dict, dict | None]:
         return {"ok": False, "note": "amend_rule needs human-readable text"}, None
     new_law = deepcopy(law)
     old = deepcopy((new_law.get("rules") or {}).get(rid))
-    for other_id, rule in (new_law.get("rules") or {}).items():
-        if other_id != rid and set(mechanics) & set(rule.get("mechanics") or {}):
-            return {"ok": False, "note": f"mechanic belongs to rule {other_id}"}, None
     merged = deepcopy((old or {}).get("mechanics") or {})
     merged.update(mechanics)
     new_law.setdefault("rules", {})[rid] = {"text": text, "mechanics": merged}
@@ -303,7 +303,7 @@ def _appoint(effect: dict, members: list[dict], gov: dict, turn: int) -> tuple[d
     if holder is not None and not any(m["id"] == holder for m in members):
         return {"ok": False, "note": f"{holder} is not seated"}, None
     new_gov = deepcopy(gov)
-    new_gov.setdefault("offices", {}).setdefault(name, {"privileges": [], "holder": None, "term_start": None})
+    new_gov.setdefault("offices", {}).setdefault(name, {"holder": None, "term_start": None})
     old_holder = new_gov["offices"][name].get("holder")
     old_start = new_gov["offices"][name].get("term_start")
     new_gov["offices"][name]["holder"] = holder

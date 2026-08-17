@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 
+from adags.constitution import apply_to_runtime
 from adags.gov import president_id
 from adags.llm import growing_speech
 from adags.state import RunState
@@ -609,7 +610,7 @@ def banner(state: RunState) -> str:
     if not state.path("control.json").exists():
         return c("1", "ADAGS") + "  (no run — /init)"
     ctl = state.control()
-    gov = state.gov()
+    gov = apply_to_runtime(state.gov(), state.law())
     prez = president_id(gov) or "vacant"
     parties = member_parties(state.members()) if state.path("members.json").exists() else {}
     wait = f"  {c('33', 'waiting')}" if ctl.get("paused") else ""
@@ -626,7 +627,7 @@ def status_block(state: RunState) -> str:
     if not state.path("control.json").exists():
         return "no run in this directory.  /init to found one."
     ctl = state.control()
-    gov = state.gov()
+    gov = apply_to_runtime(state.gov(), state.law())
     members = state.members()
     prez = (gov.get("offices") or {}).get("president") or {}
     goals = state.goals()

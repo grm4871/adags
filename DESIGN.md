@@ -166,6 +166,8 @@ The host accepts only effect types it implements. Unknown types are dropped and 
 
 The clerk can draft the wrong effects. The host validates them and the operator may veto applied effects. The clerk never decides what the law means or whether a vote passed.
 
+Citizen speech never becomes an act by regex. During a nomination, ballot, open-motion vote, or empty-goal presidency, a missing required JSON field triggers one targeted repair call. If the repair still omits the field, the act remains absent.
+
 ### Effect whitelist (v0)
 
 The host will only ever execute:
@@ -211,6 +213,8 @@ No shell, no network, no extra API keys, no spawning processes. v0 "action" is w
 - 212. At founding the presidency is vacant. First business is the first election; then the President should enact a goal and write toward it.
 
 They can change rule 201 to a supported supermajority, alter election timing, disable elections or impeachment, cap membership, and change presidential privileges. Sequential debate, ranked choice, or a judiciary remain nonbinding until the host publishes mechanics for them.
+
+They may also enact a new numeric rule such as 213 using published mechanics. Rules are applied in numeric order, so a higher-numbered rule overrides an earlier rule that controls the same mechanic. This permits genuinely new interior law and later constitutional layering without allowing agents to invent host code.
 
 ## Turn loop
 
