@@ -396,6 +396,7 @@ XaiLLM = ChatLLM
 class ScriptedLLM(LLM):
     """Deterministic stand-in. Optional per-call overrides via `scripts`."""
 
+    preserve_member_order = True
     scripts: list[dict[str, Any]] = field(default_factory=list)
     i: int = 0
 

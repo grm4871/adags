@@ -291,6 +291,21 @@ def test_checkpointed_turn_resumes_after_completed_citizen(tmp_path):
     assert state.path("journal.md").read_text().count("**continuity:** Already acted.") == 1
 
 
+def test_speaking_order_randomizes_and_reuses_checkpoint():
+    from adags.host import speaking_order
+    from adags.seed import FOUNDING_MEMBERS
+
+    def reverse(items):
+        items.reverse()
+
+    randomized = speaking_order(FOUNDING_MEMBERS, shuffle=reverse)
+    ids = [member["id"] for member in randomized]
+    assert ids == [member["id"] for member in reversed(FOUNDING_MEMBERS)]
+
+    resumed = speaking_order(FOUNDING_MEMBERS, ids, shuffle=lambda _items: 1 / 0)
+    assert [member["id"] for member in resumed] == ids
+
+
 def test_plurality_helper():
     assert (
         plurality_winner(

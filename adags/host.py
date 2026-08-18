@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 import time
 from datetime import datetime
 from typing import Any
@@ -86,6 +87,21 @@ def _budget_ok(control: dict) -> bool:
     if float(control["usd_spent"]) >= float(control["usd_cap"]):
         return False
     return True
+
+
+def speaking_order(
+    members: list[dict],
+    saved: list[str] | None = None,
+    *,
+    shuffle=None,
+) -> list[dict]:
+    """Choose a turn order, or reconstruct the order persisted at checkpoint."""
+    by_id = {str(member.get("id")): member for member in members}
+    if saved and len(saved) == len(by_id) and set(saved) == set(by_id):
+        return [by_id[member_id] for member_id in saved]
+    ordered = list(members)
+    (shuffle or random.SystemRandom().shuffle)(ordered)
+    return ordered
 
 
 def authorize_operator_turns(
@@ -362,6 +378,15 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     seat_nudge = len(members) <= 5 and count_goal_named_files(state.workspace, goals) >= 2
 
     progress = _load_turn_progress(state, turn)
+    floor = speaking_order(
+        members,
+        progress.get("speaking_order"),
+        shuffle=(lambda _members: None)
+        if getattr(llm, "preserve_member_order", False)
+        else None,
+    )
+    progress["speaking_order"] = [member["id"] for member in floor]
+    _write_turn_progress(state, progress)
     speeches: list[str] = list(progress.get("speeches") or [])
     impeach_votes: list[str] = list(progress.get("impeach_votes") or [])
     impeach_charges: dict[str, str] = dict(progress.get("impeach_charges") or {})
@@ -371,7 +396,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     n_members = len(members)
     turn_open(turn=turn, gov=gov, n_members=n_members, motion=motion, members=members)
 
-    for member in members:
+    for member in floor:
         if member["id"] in completed:
             continue
         if deadline is not None and time.monotonic() >= deadline:
@@ -685,6 +710,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         f"President: {president_id(state.gov()) or '(vacant)'}",
         f"Phase: {state.gov().get('election_phase')}",
         f"Seated: {', '.join(member_ids(state.members()))}",
+        f"Speaking order: {', '.join(member['id'] for member in floor)}",
         "",
         "## Speech",
         *speeches,
