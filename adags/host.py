@@ -14,6 +14,7 @@ from adags.memory import (
     append_record,
     compose_user,
     format_record,
+    count_goal_named_files,
     goal_clock,
     load_records,
     patch_last_record,
@@ -26,6 +27,7 @@ from adags.effects import (
     coerce_effects,
     bill_title,
     complete_set_goal,
+    inert_motion_note,
     path_in_prose,
     propose_effects,
     render_goals,
@@ -168,6 +170,14 @@ def _apply_many(
         if "goals" in result:
             goals = result["goals"]
             state.write_goals(goals)
+        if result.get("goals_meta"):
+            meta = state.goals_meta()
+            meta.update(result["goals_meta"])
+            state.write_goals_meta(meta)
+        if result.get("goals_meta_remove"):
+            meta = state.goals_meta()
+            meta.pop(str(result["goals_meta_remove"]), None)
+            state.write_goals_meta(meta)
         if "members" in result:
             members = result["members"]
             state.write_members(members)
@@ -245,7 +255,7 @@ def _motion_threshold(law: dict, motion: dict, gov: dict) -> str:
     override = value(law, "offices.president.override")
     if override:
         for fx in coerce_effects(motion.get("effects")):
-            if (fx or {}).get("type") in {"set_goal", "write_workspace"}:
+            if (fx or {}).get("type") == "write_workspace":
                 return str(override)
     return str(gov.get("vote_rule") or value(law, "motion.threshold", "majority"))
 
@@ -304,6 +314,14 @@ def veto_last(state: RunState) -> str:
         if "goals" in result:
             goals = result["goals"]
             state.write_goals(goals)
+        if result.get("goals_meta"):
+            meta = state.goals_meta()
+            meta.update(result["goals_meta"])
+            state.write_goals_meta(meta)
+        if result.get("goals_meta_remove"):
+            meta = state.goals_meta()
+            meta.pop(str(result["goals_meta_remove"]), None)
+            state.write_goals_meta(meta)
         if "members" in result:
             members = result["members"]
             state.write_members(members)
@@ -340,8 +358,9 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     goals = state.goals()
     digest = state.last_digest()
     petitions = state.petitions()
-    clock = goal_clock(goals, state.workspace, turn)
+    clock = goal_clock(goals, state.workspace, turn, meta=state.goals_meta())
     identical = identical_charter_line(law)
+    seat_nudge = len(members) <= 5 and count_goal_named_files(state.workspace, goals) >= 2
 
     progress = _load_turn_progress(state, turn)
     speeches: list[str] = list(progress.get("speeches") or [])
@@ -379,6 +398,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             last_act_line=format_record(prior[-1]) if prior else "",
             goal_clock=clock,
             identical_line=identical,
+            seat_nudge=seat_nudge,
         )
         user = compose_user(load_records(state.root, member["id"]), snapshot)
         citizen_open(member["id"], party=str(member.get("party") or "") or None)
@@ -500,32 +520,36 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             ):
                 if not effects:
                     effects = list(prop.get("effects") or [])
-                title = bill_title(
-                    title=str(prop.get("title") or ""),
-                    text=str(prop.get("text") or ""),
-                    effects=effects,
-                    speech=str(act.get("speech") or ""),
+                blocked = inert_motion_note(
+                    effects,
+                    law=state.law(),
+                    goals=state.goals(),
+                    members=state.members(),
+                    gov=gov,
                 )
-                motion = {
-                    "id": f"m{turn}-{member['id']}",
-                    "title": title,
-                    "text": str(prop.get("text") or ""),
-                    "effects": effects,
-                    "proposer": member["id"],
-                    "votes": {member["id"]: "aye"},
-                }
-                _write_open_motion(state, motion)
-                for line in wrap_field("bill", motion["title"]):
-                    emit(line)
-                for line in wrap_field("votes", format_votes(motion.get("votes"), member_parties(members))):
-                    emit(line)
-                if effects:
-                    host_bits.append(f"opened {motion['id']}")
+                if blocked:
+                    host_bits.append(blocked)
                 else:
-                    host_bits.append(
-                        f"opened {motion['id']} with no structured effects — "
-                        "prose is not law; amend_rule needs a mechanics object"
+                    title = bill_title(
+                        title=str(prop.get("title") or ""),
+                        text=str(prop.get("text") or ""),
+                        effects=effects,
+                        speech=str(act.get("speech") or ""),
                     )
+                    motion = {
+                        "id": f"m{turn}-{member['id']}",
+                        "title": title,
+                        "text": str(prop.get("text") or ""),
+                        "effects": effects,
+                        "proposer": member["id"],
+                        "votes": {member["id"]: "aye"},
+                    }
+                    _write_open_motion(state, motion)
+                    for line in wrap_field("bill", motion["title"]):
+                        emit(line)
+                    for line in wrap_field("votes", format_votes(motion.get("votes"), member_parties(members))):
+                        emit(line)
+                    host_bits.append(f"opened {motion['id']}")
         else:
             vm = as_ballot(act.get("vote_motion"))
             if vm:

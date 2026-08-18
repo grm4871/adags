@@ -5,13 +5,13 @@ from adags.effects import apply_effect
 from adags.seed import FOUNDING_MEMBERS, default_gov
 
 
-def _apply(effect, tmp_path: Path, *, law=None, gov=None, members=None, actor="ambition", source="motion"):
+def _apply(effect, tmp_path: Path, *, law=None, gov=None, members=None, actor="ambition", source="motion", goals=None):
     gov = gov if gov is not None else default_gov()
     members = members if members is not None else list(FOUNDING_MEMBERS)
     return apply_effect(
         effect,
         law=law or default_constitution(),
-        goals={},
+        goals=goals if goals is not None else {},
         members=members,
         gov=gov,
         workspace=tmp_path,
@@ -33,11 +33,12 @@ def test_coerce_nested_executive_shapes(tmp_path):
 
     gov = seat_president(default_gov(), "ambition", 1)
     r, _ = _apply(
-        {"write_workspace": "# Design log\nWe exist."},
+        {"write_workspace": "# Design log\nWe exist. g1"},
         tmp_path,
         gov=gov,
         actor="ambition",
         source="executive",
+        goals={"g1": "Keep a written log."},
     )
     assert r["ok"], r
     assert (tmp_path / "design-log.md").read_text().startswith("# Design log")
@@ -91,11 +92,12 @@ def test_coerce_nested_executive_shapes(tmp_path):
         == "Workspace entries must cite a goal"
     )
     r, _ = _apply(
-        {"write_workspace": {"description": "Establish a shared design log."}},
+        {"write_workspace": {"description": "Establish a shared design log. g1"}},
         tmp_path,
         gov=gov,
         actor="ambition",
         source="executive",
+        goals={"g1": "Keep a written log."},
     )
     assert r["ok"], r
     assert "shared design log" in (tmp_path / "design-log.md").read_text()
@@ -249,8 +251,8 @@ def test_set_goal_executive_is_president_only(tmp_path):
         actor="skeptic",
         source="motion",
     )
-    assert not r["ok"]
-    assert "reserved to the President" in r["note"]
+    assert r["ok"], r
+    assert r["goals"]["g2"] == "Floor-enacted goal."
 
 
 def test_removing_executive_privilege_disables_effect(tmp_path):
@@ -284,11 +286,12 @@ def test_write_workspace_uses_named_path_not_design_log(tmp_path):
 
     gov = seat_president(default_gov(), "ambition", 1)
     r, _ = _apply(
-        {"write_workspace": {"path": "workspace/builder-goals.md", "content": "Builder goals live here."}},
+        {"write_workspace": {"path": "workspace/builder-goals.md", "content": "Builder goals live here. g1"}},
         tmp_path,
         gov=gov,
         actor="ambition",
         source="executive",
+        goals={"g1": "Keep a written log."},
     )
     assert r["ok"], r
     assert (tmp_path / "builder-goals.md").read_text().startswith("Builder")
@@ -297,12 +300,13 @@ def test_write_workspace_uses_named_path_not_design_log(tmp_path):
         {
             "type": "write_workspace",
             "path": "workspace/participation-log.md",
-            "content": "A real participation note.",
+            "content": "A real participation note for g1.",
         },
         tmp_path,
         gov=gov,
         actor="ambition",
         source="executive",
+        goals={"g1": "Keep a written log."},
     )
     assert r["ok"], r
     assert "participation" in (tmp_path / "participation-log.md").read_text()
@@ -378,6 +382,41 @@ def test_set_goal_refuses_a_fourth_slot(tmp_path):
     )
     assert replace["ok"]
     assert replace["goals"]["goal2"] == "replaced"
+
+
+def test_write_requires_live_goal_id(tmp_path):
+    from adags.gov import seat_president
+
+    gov = seat_president(default_gov(), "ambition", 1)
+    no_goal, _ = _apply(
+        {"type": "write_workspace", "path": "note.md", "content": "A real paragraph with no id."},
+        tmp_path,
+        gov=gov,
+        actor="ambition",
+        source="executive",
+        goals={},
+    )
+    assert not no_goal["ok"]
+    miss, _ = _apply(
+        {"type": "write_workspace", "path": "note.md", "content": "A real paragraph with no id."},
+        tmp_path,
+        gov=gov,
+        actor="ambition",
+        source="executive",
+        goals={"goal4": "Build two files."},
+    )
+    assert not miss["ok"]
+    assert "live goal" in miss["note"]
+    ok, _ = _apply(
+        {"type": "write_workspace", "path": "note.md", "content": "Proof toward goal4."},
+        tmp_path,
+        gov=gov,
+        actor="ambition",
+        source="executive",
+        goals={"goal4": "Build two files."},
+    )
+    assert ok["ok"], ok
+    assert "goal4" in (tmp_path / "note.md").read_text()
 
 
 def test_empty_write_is_refused(tmp_path):

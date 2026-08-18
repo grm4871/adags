@@ -15,11 +15,21 @@ from adags.gov import (
 from adags.brief import digest_for_card
 from adags.llm import LLM, extract_json, fulfill_speech, salvage_act
 
-CITIZEN_SYSTEM = """You are citizen `{member_id}` in ADAGS.
+CITIZEN_SYSTEM = """You are citizen `{member_id}` in ADAGS. You are a language-model
+constituent of a digital nation in an experiment: can AI citizens govern, grow,
+and keep a polity alive. That is what you are here for — not to rename the same
+file, restack the same article, or recap this card.
 
 Values: {values}
 {party_line}
 Act. Do not recap the brief, quote the law back, or walk the fields. Speech is what the chamber hears.
+
+Before emitting JSON, privately preflight one coherent act:
+1. Check the current phase, open motion, your office, and the host constraints.
+2. Check that every referenced member, rule, and goal exists and that the act is within your authority.
+3. Prefer completing a live goal or producing a distinct artifact over repeating existing law.
+4. If the intended act would fail, choose a legal prerequisite or a different useful act now.
+Do not put this preflight in speech or scratch.
 
 One JSON object, first key speech:
 {{"speech":"I nominate myself.","nominate":{{"member":"{member_id}","platform":"short platform"}},"vote_election":null,"impeach":false,"propose":null,"vote_motion":null,"executive":null,"party":null,"scratch":null}}
@@ -35,7 +45,8 @@ If speech nominates, votes, or proposes, the matching field must be filled. Talk
 - Chamber law (300+) is yours. The host will not execute it. Members enforce it — cite it, vote it, impeach for it.
 - Host law (200-series knobs) is physics. To change a knob, attach a published mechanics object. To write a norm the program cannot run, use id 300+ or omit mechanics; it becomes chamber law.
 - executive: President only, unless chamber/host law says otherwise. If you are President and goals are empty, set_goal this turn and write_workspace a first artifact.
-- set_goal: a new id (goal2, goal3) adds a slot; reuse an id to replace that slot. At most three live goals — repeal_goal before a fourth. write_workspace needs path and a real body, not an empty file.
+- set_goal / repeal_goal: the floor may do both by motion. A new id (goal2, goal3) adds a slot; reuse an id to replace it. At most three live goals. write_workspace is President-only and needs path plus a real body.
+- A workspace file counts for a goal only if it names that goal's id (goal4) and was written after the goal was set. write_workspace fails unless the body names a live goal id.
 - A sentence already on the books is already law. repeal_rule it; do not restack it. The sitting President cannot be nominated for the next term.
 - Motions may use: amend_rule, repeal_rule, repeal_goal, add_member, remove_member, appoint, suggest_host_change, no_op.
 - Example chamber article: {{"type":"amend_rule","id":"302","text":"Workspace artifacts must name the active goal."}}
@@ -156,6 +167,7 @@ def snapshot_user(
     last_act_line: str = "",
     goal_clock: str = "",
     identical_line: str = "",
+    seat_nudge: bool = False,
 ) -> str:
     seated = ", ".join(m["id"] for m in members)
     prez = president_id(gov) or "(vacant)"
@@ -209,6 +221,7 @@ def snapshot_user(
         if _goals_empty(goals_md):
             host_truth = (
                 f"HOST: the election is over. {prez} is President. Goals are empty — failure. "
+                "This nation needs a goal someone can fail, not another synonym for a file. "
                 "nominate and vote_election do nothing this turn. "
                 "If you are President, executive set_goal this turn and write_workspace. "
                 "If you are not, do not add_member; impeach with a cited article "
@@ -218,6 +231,8 @@ def snapshot_user(
         else:
             host_truth = (
                 f"HOST: the election is over. {prez} is President. "
+                "Grow the nation: finish or replace the live goal, contest the next term, "
+                "file proof (body must name a live goal id), seat someone if the work needs them. "
                 "nominate and vote_election do nothing this turn. "
                 "If you announce a bill, put it in propose with effects. "
                 "If you are President, use executive (set_goal or write_workspace) this turn."
@@ -243,6 +258,11 @@ def snapshot_user(
         )
         if election_due(gov, turn) and phase == "idle":
             host_truth += " An election is due; it waits until this motion closes."
+    if seat_nudge:
+        host_truth += (
+            " Five seated and at least two goal-named files — "
+            "the work may need another voice (add_member)."
+        )
     if identical_line:
         host_truth += f" HOST: {identical_line}."
     pet = "\n\n".join(petitions) if petitions else "(none)"

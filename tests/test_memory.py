@@ -151,3 +151,36 @@ def test_goal_clock_counts_files_and_due_date(tmp_path):
         turn=8,
     )
     assert "g2 overdue 0/3 files, due turn 4" in emptyish
+
+
+def test_goal_clock_ignores_old_slogan_files(tmp_path):
+    import time
+
+    from adags.memory import goal_clock
+
+    old = tmp_path / "artifacts"
+    old.mkdir()
+    prior = old / "first.md"
+    prior.write_text("chamber artifact naming the active goal\n", encoding="utf-8")
+    meta = {
+        "goal4": {
+            "since_turn": 20,
+            "baseline": {"artifacts/first.md": prior.stat().st_mtime},
+        }
+    }
+    clock = goal_clock(
+        {"goal4": "Build two artifacts naming the active goal."},
+        tmp_path,
+        turn=21,
+        meta=meta,
+    )
+    assert "goal4 open 0/3 files" in clock
+    time.sleep(0.02)
+    (old / "fourth.md").write_text("this file names goal4 explicitly\n", encoding="utf-8")
+    clock = goal_clock(
+        {"goal4": "Build two artifacts naming the active goal."},
+        tmp_path,
+        turn=21,
+        meta=meta,
+    )
+    assert "goal4 open 1/3 files" in clock

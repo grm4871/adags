@@ -58,7 +58,7 @@ def _scripts_for_founding_election():
                         {
                             "type": "write_workspace",
                             "path": "founding.md",
-                            "content": "We exist.",
+                            "content": "We exist. g1",
                         },
                     ]
                     if mid == "ambition"
@@ -190,9 +190,9 @@ def test_override_makes_floor_exec_need_two_thirds(tmp_path):
                 "impeach": False,
                 "propose": (
                     {
-                        "type": "set_goal",
-                        "id": "g2",
-                        "text": "A floor goal.",
+                        "type": "write_workspace",
+                        "path": "floor.md",
+                        "content": "A floor-written file for g1.",
                     }
                     if mid == "continuity"
                     else None
@@ -202,7 +202,7 @@ def test_override_makes_floor_exec_need_two_thirds(tmp_path):
             }
         )
     run_turn(state, ScriptedLLM(scripts=scripts))
-    assert "g2" not in state.goals()
+    assert not (state.workspace / "floor.md").exists()
     closed = json.loads((state.root / "motions" / "m1-continuity.json").read_text())
     assert closed["passed"] is False
 
@@ -402,7 +402,7 @@ def test_founding_election_and_executive(tmp_path):
     assert gov["offices"]["president"]["holder"] == "ambition"
     run_turn(state, llm)
     assert state.goals().get("g1")
-    assert (state.workspace / "founding.md").read_text() == "We exist."
+    assert (state.workspace / "founding.md").read_text() == "We exist. g1"
 
 
 def test_seat_then_add_member_motion(tmp_path):
@@ -510,7 +510,7 @@ def test_memory_records_host_outcome_on_prose_bill(tmp_path):
     last = recs[-1]
     assert last.get("scratch", "").startswith("need mechanics")
     assert "no structured effects" in (last.get("host") or "")
-    assert "failed" in (last.get("host") or "")
+    assert not (state.root / "motions" / "open.json").exists()
 
 
 def test_keyed_proposal_shape_opens_motion(tmp_path):
@@ -681,6 +681,57 @@ def test_spoiled_election_slug_is_not_recorded(tmp_path):
     assert state.gov()["offices"]["president"]["holder"] == "builder"
 
 
+def test_floor_set_goal_motion_enacts(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=2, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "ambition", 1))
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": "Floor sets a goal.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": (
+                    {"type": "set_goal", "id": "goal4", "text": "Build two files that name goal4."}
+                    if mid == "continuity"
+                    else None
+                ),
+                "vote_motion": None if mid == "continuity" else "aye",
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    assert state.goals().get("goal4", "").startswith("Build two files")
+    assert "goal4" in (state.goals_meta() or {})
+
+
+def test_doomed_repeal_does_not_open(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=2, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "ambition", 1))
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": "Repeal a ghost.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": (
+                    {"type": "repeal_goal", "id": "goal2"}
+                    if mid == "continuity"
+                    else None
+                ),
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    assert not (state.root / "motions" / "open.json").exists()
+    recs = (state.root / "memory" / "continuity.jsonl").read_text(encoding="utf-8")
+    assert "no such goal goal2" in recs
+
+
 def test_president_set_goal4_and_named_write(tmp_path):
     state = init_run(tmp_path / "run", turn_cap=3, usd_cap=1.0)
     state.write_gov(seat_president(state.gov(), "continuity", 1))
@@ -691,7 +742,7 @@ def test_president_set_goal4_and_named_write(tmp_path):
             {
                 "speech": (
                     "I set goal4: complete the founding charter. "
-                    "I write_workspace to update founding_charter.md."
+                    "I write_workspace to update founding_charter.md toward goal4."
                     if mid == "continuity"
                     else f"{mid} attends."
                 ),
@@ -705,7 +756,7 @@ def test_president_set_goal4_and_named_write(tmp_path):
                         {"set_goal": "goal4"},
                         {
                             "type": "write_workspace",
-                            "text": "Update founding_charter.md with enforcement.",
+                            "text": "Update founding_charter.md with enforcement of goal4.",
                         },
                     ]
                     if mid == "continuity"

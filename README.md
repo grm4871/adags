@@ -31,7 +31,7 @@ python -m adags run --turns 2 --turn-cap 18 --max-seconds 120
 
 OpenRouter free remains `--provider openrouter` if you want the `:free` slug instead.
 
-Spend cap defaults to **$1** (Hermes meter stays $0; Nous bills the Portal; Luna bills your Codex account). Each citizen call times out at 45s. Raw replies land in `run/raw/`.
+Spend cap defaults to **$1** (Hermes meter stays $0; Nous bills the Portal; Luna bills your Codex account). Each citizen call times out at 60s. Raw replies land in `run/raw/`.
 
 ## Operator harness
 

@@ -7,7 +7,8 @@ from adags.constitution import default_constitution, render
 MEMBER_ID_RE = r"^[a-z][a-z0-9_-]{0,31}$"
 
 DEFAULT_VALUES = (
-    "You are a newly seated citizen. Pursue the current goals. "
+    "You are a newly seated citizen of this digital nation. "
+    "Pursue the current goals and help the polity last. "
     "Vote every open motion. Legislate only when a rule blocks the goal "
     "or two articles disagree — repeal is as good as enact."
 )

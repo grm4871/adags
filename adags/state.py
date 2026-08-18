@@ -85,6 +85,16 @@ class RunState:
     def write_goals(self, goals: dict[str, str]) -> None:
         self.path("goals.md").write_text(render_goals(goals), encoding="utf-8")
 
+    def goals_meta(self) -> dict:
+        p = self.path("goals_meta.json")
+        if not p.exists():
+            return {}
+        data = self.load_json("goals_meta.json")
+        return data if isinstance(data, dict) else {}
+
+    def write_goals_meta(self, meta: dict) -> None:
+        self.dump_json("goals_meta.json", meta)
+
     def members(self) -> list[dict]:
         return self.load_json("members.json")
 

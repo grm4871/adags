@@ -348,6 +348,14 @@ def test_citizen_repairs_empty_first_call():
     assert act["vote_election"] == "continuity"
 
 
+def test_citizen_prompt_requires_private_constraint_preflight():
+    from adags.citizens import CITIZEN_SYSTEM
+
+    assert "privately preflight one coherent act" in CITIZEN_SYSTEM
+    assert "every referenced member, rule, and goal exists" in CITIZEN_SYSTEM
+    assert "Do not put this preflight in speech or scratch" in CITIZEN_SYSTEM
+
+
 def test_citizen_infers_announced_vote_without_a_second_call():
     from adags.citizens import citizen_act
     from adags.llm import ScriptedLLM

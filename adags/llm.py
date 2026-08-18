@@ -122,8 +122,8 @@ class ChatLLM(LLM):
         self.model = model
         self.json_mode = json_mode
         self._in_rate, self._out_rate = rates if rates is not None else _rates_for(model)
-        self.timeout = float(os.environ.get("ADAGS_CALL_TIMEOUT", "45"))
-        self.think_timeout = float(os.environ.get("ADAGS_THINK_TIMEOUT", "12"))
+        self.timeout = float(os.environ.get("ADAGS_CALL_TIMEOUT", "60"))
+        self.think_timeout = float(os.environ.get("ADAGS_THINK_TIMEOUT", "20"))
         self.first_token_timeout = float(os.environ.get("ADAGS_FIRST_TOKEN_TIMEOUT", "8"))
         self.client = OpenAI(
             api_key=api_key,
@@ -166,7 +166,7 @@ class ChatLLM(LLM):
             timeout = completion_deadline - time.monotonic()
             if timeout <= 0:
                 return LLMResult(text="", error="wall-clock deadline reached")
-            max_tokens = int(os.environ.get("ADAGS_MAX_TOKENS", "1200"))
+            max_tokens = int(os.environ.get("ADAGS_MAX_TOKENS", "1800"))
             if self.remaining_usd is not None and (self._in_rate or self._out_rate):
                 # UTF-8 bytes are a conservative upper bound on prompt tokens.
                 prompt_tokens = sum(

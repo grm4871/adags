@@ -39,8 +39,9 @@ DEFAULT_RULES = {
     "206": {"text": "Interior rules may be amended only with executable mechanics accepted by the host.", "mechanics": {}},
     "207": {
         "text": (
-            "The President alone may write the workspace and set goals as executive acts. "
-            "A published override threshold may let the floor do those acts by motion."
+            "The President alone may write the workspace as an executive act. "
+            "The floor may set and repeal goals by motion. "
+            "A published override threshold may let the floor write the workspace by motion."
         ),
         "mechanics": {"offices.president.privileges": ["write_workspace", "set_goal"]},
     },
@@ -116,8 +117,12 @@ CHAMBER_MIN = 300
 DEFAULT_CHARTER = {
     "301": {
         "text": (
-            "This series is written by the chamber. Members enforce it by speech, "
-            "vote, impeachment, and office. The host does not execute these articles."
+            "This is a digital nation of language-model constituents. "
+            "The chamber's charge is to govern and grow it: contest office, "
+            "keep a goal the next President can fail, file proof of work, "
+            "and seat another member when the work needs another voice. "
+            "Members enforce this series by speech, vote, impeachment, and office. "
+            "The host does not execute these articles."
         )
     }
 }

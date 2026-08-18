@@ -210,15 +210,23 @@ def _goal_tokens(text: str) -> set[str]:
     }
 
 
-def _file_cites_goal(body: str, name: str, gid: str, goal_text: str) -> bool:
+def _file_cites_goal(body: str, name: str, gid: str, goal_text: str = "") -> bool:
+    """A file counts only if it names this goal's id, not shared slogan words."""
     hay = f"{name}\n{body}".lower()
-    if gid.lower() in hay:
+    needle = str(gid or "").strip().lower()
+    return bool(needle) and needle in hay
+
+
+def _written_after(path: Path, rel: str, baseline: dict[str, float] | None) -> bool:
+    if not baseline:
         return True
-    tokens = _goal_tokens(goal_text)
-    if not tokens:
+    prior = baseline.get(rel)
+    if prior is None:
+        return True
+    try:
+        return path.stat().st_mtime > float(prior) + 0.001
+    except OSError:
         return False
-    hits = sum(1 for tok in tokens if tok in hay)
-    return hits >= min(2, len(tokens))
 
 
 def goal_clock(
@@ -227,6 +235,7 @@ def goal_clock(
     turn: int,
     *,
     need: int = GOAL_EVIDENCE_NEED,
+    meta: dict | None = None,
 ) -> str:
     """One line of evidence and due-date for each live goal. Empty if none enacted."""
     if not goals:
@@ -235,7 +244,10 @@ def goal_clock(
     if workspace.exists():
         files = [p for p in workspace.rglob("*") if p.is_file()]
     bits: list[str] = []
+    meta = meta or {}
     for gid, text in goals.items():
+        baseline = ((meta.get(gid) or {}) if isinstance(meta.get(gid), dict) else {})
+        baseline = baseline.get("baseline") if isinstance(baseline, dict) else None
         cites = 0
         for path in files:
             try:
@@ -243,6 +255,8 @@ def goal_clock(
             except OSError:
                 continue
             rel = path.relative_to(workspace).as_posix()
+            if not _written_after(path, rel, baseline if isinstance(baseline, dict) else None):
+                continue
             if _file_cites_goal(body, rel, gid, text):
                 cites += 1
         due = goal_until(text)
@@ -258,6 +272,23 @@ def goal_clock(
             clock = f"due turn {due}"
         bits.append(f"{gid} {state} {min(cites, need)}/{need} files, {clock}")
     return "; ".join(bits)
+
+
+def count_goal_named_files(workspace: Path, goals: dict[str, str]) -> int:
+    if not goals or not workspace.exists():
+        return 0
+    n = 0
+    needles = [str(g).strip().lower() for g in goals if str(g).strip()]
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            hay = (path.read_text(encoding="utf-8", errors="replace") + "\n" + path.name).lower()
+        except OSError:
+            continue
+        if any(tok in hay for tok in needles):
+            n += 1
+    return n
 
 
 def workspace_card(workspace: Path, *, limit: int = 8) -> str:

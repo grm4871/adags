@@ -322,6 +322,99 @@ def propose_effects(prop: dict | None) -> list[dict]:
     return []
 
 
+def inert_motion_note(
+    effects: list,
+    *,
+    law: dict,
+    goals: dict[str, str],
+    members: list[dict],
+    gov: dict,
+) -> str | None:
+    """Why this bill must not open. None if at least one effect could execute."""
+    fx = coerce_effects(effects)
+    if not fx:
+        return "propose ignored (no structured effects)"
+    blocked: list[str] = []
+    live = 0
+    for raw in fx:
+        why = _why_inert(raw, law=law, goals=goals, members=members, gov=gov)
+        if why:
+            blocked.append(why)
+        else:
+            live += 1
+    if live:
+        return None
+    return f"propose ignored ({blocked[0]})"
+
+
+def _why_inert(
+    effect: dict,
+    *,
+    law: dict,
+    goals: dict[str, str],
+    members: list[dict],
+    gov: dict,
+) -> str | None:
+    fx = normalize_effect(effect) or effect
+    kind = (fx or {}).get("type")
+    if kind == "no_op":
+        return None
+    if kind == "write_workspace":
+        if "write_workspace" in (value(law, "offices.president.privileges", []) or []) and not value(
+            law, "offices.president.override"
+        ):
+            return "write_workspace is reserved to the President"
+        body = str(fx.get("content") or fx.get("text") or "").strip()
+        rel = str(fx.get("path") or "")
+        if not body or body == rel:
+            return "wrote nothing (empty or path-only)"
+        if not goals:
+            return "write_workspace needs a live goal; set_goal first"
+        if not cited_live_goal(body, goals):
+            return "write_workspace must name a live goal id"
+        return None
+    if kind == "set_goal":
+        text = str(fx.get("text") or "").strip()
+        if not text:
+            return "set_goal needs text"
+        gid = str(fx.get("id") or "goal1").strip()
+        cap = value(law, "goals.max_live", 3)
+        if gid not in goals and cap is not None and len(goals) >= int(cap):
+            return f"goal register full ({int(cap)}); repeal_goal one first"
+        return None
+    if kind == "repeal_goal":
+        gid = str(fx.get("id") or "").strip()
+        if gid not in goals:
+            return f"no such goal {gid}"
+        return None
+    if kind == "add_member":
+        mid = str(fx.get("id") or "").strip().lower()
+        if any(m["id"] == mid for m in members):
+            return f"{mid} is already seated"
+        return None
+    if kind == "remove_member":
+        mid = str(fx.get("id") or "").strip()
+        if not any(m["id"] == mid for m in members):
+            return f"{mid} is not seated"
+        return None
+    if kind == "amend_rule":
+        text = str(fx.get("text") or fx.get("value") or "").strip()
+        if not text:
+            return "amend_rule needs human-readable text"
+        match = matching_article(law, text)
+        if match:
+            return f"already law {match}"
+        return None
+    if kind == "repeal_rule":
+        rid = str(fx.get("id") or "").strip()
+        if rid not in (law.get("charter") or {}) and rid not in (law.get("rules") or {}):
+            return f"no such rule {rid}"
+        return None
+    if kind == "appoint" and value(law, "election.enabled", True) and fx.get("office", "president") == "president":
+        return "appoint president is inert while election_enabled"
+    return None
+
+
 def apply_effect(
     effect: dict,
     *,
@@ -352,7 +445,14 @@ def apply_effect(
         holders = {holder} if holder and kind in privileges else set()
         if source == "executive" and actor not in holders:
             return {"ok": False, "note": f"{kind} requires office privilege (holders: {sorted(holders)})"}, None
-        if source == "motion" and kind in privileges and not value(law, "offices.president.override"):
+        # write_workspace stays exclusive unless a published override exists.
+        # set_goal is ordinary legislation; the floor may enact it by motion.
+        if (
+            source == "motion"
+            and kind == "write_workspace"
+            and kind in privileges
+            and not value(law, "offices.president.override")
+        ):
             return {"ok": False, "note": f"{kind} is reserved to the President"}, None
 
     if source == "motion" and kind == "appoint" and value(law, "election.enabled", True) and effect.get("office", "president") == "president":
@@ -366,7 +466,7 @@ def apply_effect(
     if kind == "repeal_rule":
         return _repeal_rule(effect, law)
     if kind == "set_goal":
-        return _set_goal(effect, goals, law)
+        return _set_goal(effect, goals, law, workspace=workspace, turn=turn)
     if kind == "repeal_goal":
         return _repeal_goal(effect, goals)
     if kind == "add_member":
@@ -376,7 +476,7 @@ def apply_effect(
     if kind == "appoint":
         return _appoint(effect, members, gov, turn)
     if kind == "write_workspace":
-        return _write_workspace(effect, workspace)
+        return _write_workspace(effect, workspace, goals)
     if kind == "suggest_host_change":
         return _suggest_host_change(effect, workspace, turn, actor)
     return {"ok": False, "note": f"inert {kind}"}, None
@@ -487,7 +587,27 @@ def _repeal_rule(effect: dict, law: dict) -> tuple[dict, dict | None]:
     }
 
 
-def _set_goal(effect: dict, goals: dict[str, str], law: dict) -> tuple[dict, dict | None]:
+def workspace_baseline(workspace: Path) -> dict[str, float]:
+    if not workspace or not workspace.exists():
+        return {}
+    out: dict[str, float] = {}
+    for path in workspace.rglob("*"):
+        if path.is_file():
+            try:
+                out[path.relative_to(workspace).as_posix()] = path.stat().st_mtime
+            except OSError:
+                continue
+    return out
+
+
+def _set_goal(
+    effect: dict,
+    goals: dict[str, str],
+    law: dict,
+    *,
+    workspace: Path,
+    turn: int,
+) -> tuple[dict, dict | None]:
     gid = str(effect.get("id") or "g1").strip()
     text = str(effect.get("text") or "").strip()
     if not text:
@@ -505,7 +625,14 @@ def _set_goal(effect: dict, goals: dict[str, str], law: dict) -> tuple[dict, dic
         inverse = {"type": "repeal_goal", "id": gid}
     else:
         inverse = {"type": "set_goal", "id": gid, "text": old}
-    return {"ok": True, "note": f"set goal {gid}", "goals": new_goals}, inverse
+    return {
+        "ok": True,
+        "note": f"set goal {gid}",
+        "goals": new_goals,
+        "goals_meta": {
+            gid: {"since_turn": int(turn), "baseline": workspace_baseline(workspace)}
+        },
+    }, inverse
 
 
 def _repeal_goal(effect: dict, goals: dict[str, str]) -> tuple[dict, dict | None]:
@@ -514,7 +641,12 @@ def _repeal_goal(effect: dict, goals: dict[str, str]) -> tuple[dict, dict | None
         return {"ok": False, "note": f"no such goal {gid}"}, None
     new_goals = deepcopy(goals)
     old = new_goals.pop(gid)
-    return {"ok": True, "note": f"repealed goal {gid}", "goals": new_goals}, {
+    return {
+        "ok": True,
+        "note": f"repealed goal {gid}",
+        "goals": new_goals,
+        "goals_meta_remove": gid,
+    }, {
         "type": "set_goal",
         "id": gid,
         "text": old,
@@ -585,7 +717,16 @@ def _appoint(effect: dict, members: list[dict], gov: dict, turn: int) -> tuple[d
     }
 
 
-def _write_workspace(effect: dict, workspace: Path) -> tuple[dict, dict | None]:
+def cited_live_goal(body: str, goals: dict[str, str]) -> str | None:
+    hay = (body or "").lower()
+    for gid in goals or {}:
+        token = str(gid).strip().lower()
+        if token and token in hay:
+            return str(gid)
+    return None
+
+
+def _write_workspace(effect: dict, workspace: Path, goals: dict[str, str]) -> tuple[dict, dict | None]:
     effect = _resolve_write_fields(dict(effect))
     rel = _safe_relpath(str(effect.get("path") or "design-log.md"))
     if not rel:
@@ -594,6 +735,11 @@ def _write_workspace(effect: dict, workspace: Path) -> tuple[dict, dict | None]:
     body = content.strip()
     if not body or body == rel or _as_workspace_rel(body) == rel:
         return {"ok": False, "note": f"wrote nothing ({rel} empty or path-only)"}, None
+    if not goals:
+        return {"ok": False, "note": "write_workspace needs a live goal; set_goal first"}, None
+    if not cited_live_goal(body, goals):
+        ids = ", ".join(goals)
+        return {"ok": False, "note": f"write_workspace must name a live goal id ({ids})"}, None
     dest = (workspace / rel).resolve()
     try:
         dest.relative_to(workspace.resolve())
