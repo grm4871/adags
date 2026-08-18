@@ -668,7 +668,8 @@ def test_snapshot_is_short():
     assert "offices:" not in user
     assert "JSON only" in user
     assert "HOST: this is a live ballot" not in user
-    assert "Last time you acted:" in user
+    assert "Earlier this turn" in user
+    assert "Other citizens last turn" in user
     assert "Workspace:" in user
     assert len(user) < len(CONSTITUTION) + 4000
 
@@ -699,6 +700,29 @@ def test_snapshot_ballot_replaces_false_digest():
     assert "Builder has won by unanimous vote" not in user
     assert "1/3" in user or "1/" in user
     assert "Legal votes: builder, ambition" in user
+
+
+def test_snapshot_shows_current_floor_and_deduplicates_own_prior_speech():
+    digest = (
+        "# Turn 2 digest\n\n## Speech\n"
+        "**continuity:** I support the ledger.\n"
+        "**ambition:** I oppose the ledger.\n\nImpeach marks: none\n"
+    )
+    user = snapshot_user(
+        member_id="ambition",
+        constitution=CONSTITUTION,
+        gov=default_gov(),
+        members=FOUNDING_MEMBERS,
+        goals_md="# Goals\n\n(none)\n",
+        open_motion=None,
+        digest=digest,
+        petitions=[],
+        turn=3,
+        current_speeches=["**continuity:** Builder's amendment needs a deadline."],
+    )
+    assert "I support the ledger" in user
+    assert "I oppose the ledger" not in user
+    assert "Builder's amendment needs a deadline" in user
 
 
 def test_snapshot_idle_says_election_over():

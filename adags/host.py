@@ -13,7 +13,6 @@ from adags.constitution import apply_to_runtime, identical_charter_line, value
 from adags.memory import (
     append_record,
     compose_user,
-    format_record,
     count_goal_named_files,
     goal_clock,
     load_records,
@@ -395,7 +394,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             petitions=petitions,
             turn=turn,
             workspace_md=workspace_card(state.workspace),
-            last_act_line=format_record(prior[-1]) if prior else "",
+            current_speeches=speeches,
             goal_clock=clock,
             identical_line=identical,
             seat_nudge=seat_nudge,

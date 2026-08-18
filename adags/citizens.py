@@ -30,6 +30,8 @@ Before emitting JSON, privately preflight one coherent act:
 3. Prefer completing a live goal or producing a distinct artifact over repeating existing law.
 4. If the intended act would fail, choose a legal prerequisite or a different useful act now.
 Do not put this preflight in speech or scratch.
+When another citizen's argument is relevant, name them and answer the substance. Build coalitions,
+offer compromises, or state a concrete disagreement; do not merely echo their conclusion.
 
 One JSON object, first key speech:
 {{"speech":"I nominate myself.","nominate":{{"member":"{member_id}","platform":"short platform"}},"vote_election":null,"impeach":false,"propose":null,"vote_motion":null,"executive":null,"party":null,"scratch":null}}
@@ -164,7 +166,7 @@ def snapshot_user(
     petitions: list[str],
     turn: int,
     workspace_md: str = "",
-    last_act_line: str = "",
+    current_speeches: list[str] | None = None,
     goal_clock: str = "",
     identical_line: str = "",
     seat_nudge: bool = False,
@@ -197,7 +199,7 @@ def snapshot_user(
             f"Legal votes: {names}. Recorded: {tally} ({len(ballots)}/{need}). Speeches do not count."
             f"{ineligible}"
         )
-        digest = host_truth
+        digest = digest_for_card(digest, exclude_member=member_id)
     elif phase == "nominate":
         if prez and prez != "(vacant)":
             who = f"{prez} is caretaker until a successor is seated. "
@@ -216,7 +218,7 @@ def snapshot_user(
             "You cannot nominate someone who is not seated. "
             "If you are President, you may still write_workspace toward current goals."
         )
-        digest = digest_for_card(digest)
+        digest = digest_for_card(digest, exclude_member=member_id)
     elif prez and prez != "(vacant)":
         if _goals_empty(goals_md):
             host_truth = (
@@ -242,10 +244,10 @@ def snapshot_user(
                     f" Goals: {goal_clock}. "
                     "Repeal or replace a complete or overdue goal."
                 )
-        digest = digest_for_card(digest)
+        digest = digest_for_card(digest, exclude_member=member_id)
     else:
         host_truth = "HOST: presidency vacant. First business is nominations."
-        digest = digest_for_card(digest)
+        digest = digest_for_card(digest, exclude_member=member_id)
     motion = "(none)"
     if open_motion:
         from adags.render import motion_label
@@ -276,7 +278,7 @@ def snapshot_user(
         role = "not President"
     extra = f"\n{host_truth}\n" if host_truth else "\n"
     files = (workspace_md or "").strip() or "(empty)"
-    prior = (last_act_line or "").strip() or "(none yet)"
+    current_floor = "\n".join(current_speeches or []).strip() or "(you speak first)"
     roster = party_roster(members)
     if roster:
         parties = "\n".join(f"- {name}: {', '.join(ids)}" for name, ids in sorted(roster.items()))
@@ -302,10 +304,10 @@ Petitions:
 Workspace:
 {files}
 
-Last time you acted:
-{prior}
+Earlier this turn (these citizens have already spoken; answer them when relevant):
+{current_floor}
 
-Last turn:
+Other citizens last turn (your own line is already in your private act history):
 {digest}
 
 Law (chamber series is yours to enforce; 200-series knobs are host physics; do not recap):

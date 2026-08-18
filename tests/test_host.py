@@ -275,9 +275,17 @@ def test_checkpointed_turn_resumes_after_completed_citizen(tmp_path):
                 "executive": None,
             }
         )
-    llm = ScriptedLLM(scripts=scripts)
+    class RecordingLLM(ScriptedLLM):
+        def complete(self, **kwargs):
+            self.users.append(kwargs["user"])
+            return super().complete(**kwargs)
+
+    llm = RecordingLLM(scripts=scripts)
+    llm.users = []
     run_turn(state, llm)
     assert llm.i == 4
+    assert "**continuity:** Already acted." in llm.users[0]
+    assert "**ambition:** ambition attends." in llm.users[1]
     assert state.control()["turn"] == 4
     assert not state.path("turn_progress.json").exists()
     assert state.path("journal.md").read_text().count("**continuity:** Already acted.") == 1

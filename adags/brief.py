@@ -126,10 +126,23 @@ def maybe_clerk_brief(
     return text[:2000]
 
 
-def digest_for_card(digest: str) -> str:
+def digest_for_card(digest: str, *, exclude_member: str | None = None) -> str:
+    """Return prior chamber speech without repeating summaries or own memory."""
     text = digest or ""
-    if text.lstrip().startswith("# Clerk brief"):
-        if "\n---\n" in text:
-            text = text.split("\n---\n", 1)[0]
-        return text.strip()[:1600]
-    return text[-800:]
+    if "\n---\n" in text:
+        # The mechanical digest follows the periodic clerk recap. Including both
+        # repeats the same events in two forms.
+        text = text.rsplit("\n---\n", 1)[1]
+    marker = "## Speech\n"
+    if marker not in text:
+        return "(none)"
+    text = text.split(marker, 1)[1]
+    if "\nImpeach marks:" in text:
+        text = text.split("\nImpeach marks:", 1)[0]
+    if exclude_member:
+        own = re.compile(
+            rf"^\*\*{re.escape(exclude_member)}:\*\*.*?(?=^\*\*[^\n]+:\*\*|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        text = own.sub("", text)
+    return text.strip()[-3200:] or "(none)"

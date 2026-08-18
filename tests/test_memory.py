@@ -90,7 +90,7 @@ def test_workspace_card_lists_heads(tmp_path):
     assert "constitutional stewardship" in card
 
 
-def test_clerk_brief_every_fourth_turn_and_card_prefers_it(tmp_path):
+def test_clerk_brief_every_fourth_turn_and_card_uses_exact_speech_once(tmp_path):
     from adags.brief import digest_for_card, due, maybe_clerk_brief, recent_journal
 
     assert due(4) is True
@@ -111,11 +111,19 @@ def test_clerk_brief_every_fourth_turn_and_card_prefers_it(tmp_path):
         runner=lambda _user: "Ambition sat. The 316 clone died as already-law. Ten goals remain.",
     )
     assert text and "already-law" in text
-    card = digest_for_card(
-        "# Clerk brief (turns 1–4)\n\nOffice changed hands.\n\n---\n\n# Turn 4 digest\n**builder:** recap\n"
+    digest = (
+        "# Clerk brief (turns 1–4)\n\nOffice changed hands.\n\n---\n\n"
+        "# Turn 4 digest\n\n## Speech\n**builder:** recap\n**ambition:** dissent\n\n"
+        "Impeach marks: none\n"
     )
-    assert "Office changed hands" in card
-    assert "recap" not in card
+    card = digest_for_card(digest)
+    assert "Office changed hands" not in card
+    assert card.count("recap") == 1
+    assert "dissent" in card
+
+    ambition_card = digest_for_card(digest, exclude_member="ambition")
+    assert "dissent" not in ambition_card
+    assert "recap" in ambition_card
 
 
 def test_goal_clock_counts_files_and_due_date(tmp_path):
