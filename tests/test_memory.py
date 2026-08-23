@@ -165,7 +165,7 @@ def test_goal_clock_counts_files_and_due_date(tmp_path):
         tmp_path,
         turn=8,
     )
-    assert "g1 open 1/3 files, due turn 12" in clock
+    assert "g1 complete 1/1 files, due turn 12" in clock
     (tmp_path / "journal" / "turn8.md").write_text("g1 civic journal\n", encoding="utf-8")
     (tmp_path / "journal" / "turn10.md").write_text("more civic journal for g1\n", encoding="utf-8")
     done = goal_clock(
@@ -173,19 +173,19 @@ def test_goal_clock_counts_files_and_due_date(tmp_path):
         tmp_path,
         turn=8,
     )
-    assert "g1 complete 3/3 files" in done
+    assert "g1 complete 1/1 files" in done
     late = goal_clock(
         {"g1": "Keep a civic journal until turn 6."},
         tmp_path,
         turn=8,
     )
-    assert "g1 complete 3/3 files" in late
+    assert "g1 complete 1/1 files" in late
     emptyish = goal_clock(
         {"g2": "Ship a prototype until turn 4."},
         tmp_path,
         turn=8,
     )
-    assert "g2 overdue 0/3 files, due turn 4" in emptyish
+    assert "g2 overdue 0/1 files, due turn 4" in emptyish
     junk = goal_clock(
         {
             "speech-goal": "and write a workspace as required by offices.president.privileges (host article 207)."
@@ -217,7 +217,7 @@ def test_goal_clock_ignores_old_slogan_files(tmp_path):
         turn=21,
         meta=meta,
     )
-    assert "goal4 open 0/3 files" in clock
+    assert "goal4 open 0/1 files" in clock
     time.sleep(0.02)
     (old / "fourth.md").write_text("this file names goal4 explicitly\n", encoding="utf-8")
     clock = goal_clock(
@@ -226,4 +226,4 @@ def test_goal_clock_ignores_old_slogan_files(tmp_path):
         turn=21,
         meta=meta,
     )
-    assert "goal4 open 1/3 files" in clock
+    assert "goal4 complete 1/1 files" in clock

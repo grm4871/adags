@@ -47,7 +47,7 @@ If speech nominates, votes, or proposes, the matching field must be filled. Talk
 - nominate / vote_election: only in nominate / ballot phase.
 - Caucus primary: the first same-party nomination locks that ticket. Later same-party nominations second it. Leave the party this turn to bolt and run or vote separately.
 - Ballot physics: plurality of valid votes; first valid vote counts; ties go to the earliest nominee. Quorum is enough members voting, not a majority for one name. Vote your caucus ticket unless you are bolting.
-- impeach: a chamber or host article id (e.g. "303") to fire the President this turn. Bare true does not count. A threat is not a mark.
+- impeach: a chamber or host article id (e.g. "303"), or the charge "negligence" for a President who persistently fails duty — empty register, unpaid deficit ignored, refused execution — even without an article. Bare true does not count. A threat is not a mark.
 - If a motion is open: vote_motion aye|nay|abstain. Do not propose another.
 - If none is open and you want a law: propose amend_rule with the sentence you want in the constitution. Do not only describe it.
 - Chamber law (300+) is yours. The host will not execute it. Members enforce it — cite it, vote it, impeach for it.
@@ -111,8 +111,11 @@ def party_line(member: dict, members: list[dict], gov: dict | None = None) -> st
     if mine in majority and not rivals:
         return (
             f"You are in party `{mine}`, which already holds the chamber. "
-            "A one-party house is not a contest. Invent a rival slug this turn "
-            "if you want the presidency for yourself, or put this caucus on a goal and a file.\n"
+            "A one-party house is not a contest and history shows it rots: "
+            "unquestioned power drifts while the treasury bleeds. Bolting is "
+            "honored here — set party to a new slug this turn and contest the "
+            "presidency, or demand the floor split. A chamber of one party has "
+            "no one to blame when things fail.\n"
             + ticket_bit
         )
     if not rivals:

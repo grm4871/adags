@@ -34,7 +34,7 @@ DEFAULT_RULES = {
     },
     "205": {
         "text": "The goal register holds at most three live objectives; a fourth requires repealing one.",
-        "mechanics": {"goals.max_live": 3},
+        "mechanics": {"goals.max_live": 3, "goals.evidence_need": 1},
     },
     "206": {"text": "Interior rules may be amended only with executable mechanics accepted by the host.", "mechanics": {}},
     "207": {
@@ -113,6 +113,7 @@ MECHANIC_SPECS: dict[str, tuple[type | tuple[type, ...], Any]] = {
     "election.consecutive_limit": ((int, type(None)), range(0, 11)),
     "election.caucus_primary": (bool, None),
     "goals.max_live": ((int, type(None)), range(1, 21)),
+    "goals.evidence_need": (int, range(1, 11)),
     "impeachment.enabled": (bool, None),
     "impeachment.threshold": (str, {"majority", "two_thirds", "unanimous"}),
     "membership.max_members": ((int, type(None)), None),

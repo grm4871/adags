@@ -122,10 +122,15 @@ def format_standing(
         lines.append("You currently lean: " + ", ".join(phrase(own)) + ".")
     if not lines:
         return ""
-    return "\n".join(
-        [
-            "Standing among colleagues (observed from acts; whispers bond deepest,",
+    out = ["Standing among colleagues (observed from acts; whispers bond deepest,",
             "impeachment cuts hardest). Debts get called in; grudges vote:",
-            *lines,
-        ]
-    )
+            *lines]
+    # Saturation warning: near-unanimous warmth is a consensus trap.
+    warm = [v for v, _ in toward if v > 0]
+    if len(toward) >= 3 and len(warm) == len(toward):
+        out.append(
+            "WARNING: the whole chamber leans your way. Unanimity is not "
+            "safety — it is a consensus trap. Court disagreement or you will "
+            "drift unchallenged while real problems go unspoken."
+        )
+    return "\n".join(out)

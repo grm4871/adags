@@ -254,12 +254,17 @@ def goal_clock(
     workspace: Path,
     turn: int,
     *,
-    need: int = GOAL_EVIDENCE_NEED,
+    need: int | None = None,
+    law: dict | None = None,
     meta: dict | None = None,
 ) -> str:
     """One line of evidence and due-date for each live goal. Empty if none enacted."""
     if not goals:
         return ""
+    if need is None:
+        from adags.constitution import value
+
+        need = int(value(law or {}, "goals.evidence_need", 1))
     files: list[Path] = []
     if workspace.exists():
         files = [p for p in workspace.rglob("*") if p.is_file()]

@@ -183,6 +183,10 @@ def as_impeach(value: Any) -> tuple[bool, str | None]:
             return False, None
         if low in {"true", "yes", "impeach"}:
             return True, None
+        # Negligence charge: impeach without a cited article still counts when
+        # the member names a concrete failure instead of a bare threat.
+        if low in {"negligence", "dereliction"} or low.startswith("negligence"):
+            return True, "negligence"
         found = re.search(r"(\d{3})", text)
         if found and int(found.group(1)) >= 200:
             return True, found.group(1)

@@ -423,8 +423,8 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     register_was_empty = vacant
     digest = state.last_digest()
     petitions = state.petitions()
-    clock = goal_clock(goals, state.workspace, turn, meta=state.goals_meta())
     identical = identical_charter_line(law)
+    clock = goal_clock(goals, state.workspace, turn, law=state.law(), meta=state.goals_meta())
     unaffiliated = [m for m in members if not str(m.get("party") or "").strip()]
     seat_nudge = bool(
         (election_due(gov, turn) or gov.get("election_phase") in {"nominate", "ballot"})
@@ -903,7 +903,9 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         turn=turn,
         n_members=len(state.members()),
         goals=state.goals(),
-        goal_clock_text=goal_clock(state.goals(), state.workspace, turn, meta=state.goals_meta()),
+        goal_clock_text=goal_clock(
+            state.goals(), state.workspace, turn, law=state.law(), meta=state.goals_meta()
+        ),
     )
 
     # Impeach
