@@ -21,7 +21,7 @@ from adags.seed import DEFAULT_VALUES
 
 RULE_ID_RE = re.compile(r"^(\d{3})\b")
 IMMUTABLE_MIN, IMMUTABLE_MAX = 100, 199
-EXECUTIVE_TYPES = frozenset({"write_workspace", "set_goal"})
+EXECUTIVE_TYPES = frozenset({"write_workspace", "set_goal", "edit_policy"})
 LEGISLATIVE_OK = frozenset(
     {
         "amend_rule",
@@ -32,8 +32,10 @@ LEGISLATIVE_OK = frozenset(
         "remove_member",
         "appoint",
         "write_workspace",
+        "edit_policy",
         "suggest_host_change",
         "no_op",
+        "_dissolve_committee",
     }
 )
 
@@ -190,6 +192,10 @@ def normalize_effect(effect: Any) -> dict | None:
             _resolve_write_fields(out)
         if out["type"] == "set_goal":
             complete_set_goal(out)
+        if out["type"] == "edit_policy":
+            out["body"] = str(
+                out.get("body") or out.get("content") or out.get("text") or ""
+            ).strip()
         return out
     nested = [k for k in effect if k in LEGISLATIVE_OK]
     if len(nested) == 1:
@@ -206,11 +212,17 @@ def normalize_effect(effect: Any) -> dict | None:
                 _resolve_write_fields(out)
             if kind == "set_goal":
                 complete_set_goal(out)
+            if kind == "edit_policy":
+                out["body"] = str(
+                    out.get("body") or out.get("content") or out.get("text") or ""
+                ).strip()
             return out
         if kind == "write_workspace":
             return _resolve_write_fields({"type": "write_workspace", "content": str(body)})
         if kind == "set_goal":
             return complete_set_goal({"type": "set_goal", "text": str(body)})
+        if kind == "edit_policy":
+            return {"type": "edit_policy", "body": str(body).strip()}
         if kind == "repeal_goal":
             return {"type": "repeal_goal", "id": str(body)}
         if kind == "amend_rule":
@@ -288,6 +300,8 @@ def bill_title(
             return f"set_param {fx['key']}"
         if kind == "write_workspace":
             return f"write {fx.get('path') or 'workspace'}"
+        if kind == "edit_policy":
+            return "edit nation policy"
         if kind == "suggest_host_change":
             return f"suggest {fx.get('title') or 'host change'}"[:120]
         if kind:
@@ -359,6 +373,8 @@ def _why_inert(
     kind = (fx or {}).get("type")
     if kind == "no_op":
         return None
+    if kind == "edit_policy":
+        return "nation policy is reserved to the President"
     if kind == "write_workspace":
         if "write_workspace" in (value(law, "offices.president.privileges", []) or []) and not value(
             law, "offices.president.override"
@@ -410,7 +426,12 @@ def _why_inert(
         if rid not in (law.get("charter") or {}) and rid not in (law.get("rules") or {}):
             return f"no such rule {rid}"
         return None
-    if kind == "appoint" and value(law, "election.enabled", True) and fx.get("office", "president") == "president":
+    if (
+        kind == "appoint"
+        and not fx.get("committee")
+        and value(law, "election.enabled", True)
+        and fx.get("office", "president") == "president"
+    ):
         return "appoint president is inert while election_enabled"
     return None
 
@@ -426,10 +447,12 @@ def apply_effect(
     turn: int,
     actor: str | None,
     source: str,
+    committee_gate=None,
 ) -> tuple[dict[str, Any], dict | None]:
     """
     Apply one effect. Returns (result, inverse_or_none).
     result: {ok, note, law?, goals?, members?, gov?, writes?}
+    committee_gate: optional callable(rel_path, actor) -> refusal note or None.
     """
     effect = normalize_effect(effect) or {}
     kind = effect.get("type")
@@ -441,12 +464,15 @@ def apply_effect(
 
     if kind in EXECUTIVE_TYPES:
         holder = (office(gov) or {}).get("holder")
-        privileges = value(law, "offices.president.privileges", [])
-        holders = {holder} if holder and kind in privileges else set()
+        privileges = value(law, "offices.president.privileges", []) or []
+        allowed = kind in privileges or kind == "edit_policy"
+        holders = {holder} if holder and allowed else set()
         if source == "executive" and actor not in holders:
             return {"ok": False, "note": f"{kind} requires office privilege (holders: {sorted(holders)})"}, None
         # write_workspace stays exclusive unless a published override exists.
         # set_goal is ordinary legislation; the floor may enact it by motion.
+        if source == "motion" and kind == "edit_policy":
+            return {"ok": False, "note": "nation policy is reserved to the President"}, None
         if (
             source == "motion"
             and kind == "write_workspace"
@@ -455,7 +481,13 @@ def apply_effect(
         ):
             return {"ok": False, "note": f"{kind} is reserved to the President"}, None
 
-    if source == "motion" and kind == "appoint" and value(law, "election.enabled", True) and effect.get("office", "president") == "president":
+    if (
+        source == "motion"
+        and kind == "appoint"
+        and not effect.get("committee")
+        and value(law, "election.enabled", True)
+        and effect.get("office", "president") == "president"
+    ):
         return {"ok": False, "note": "appoint president is inert while election_enabled"}, None
 
     if kind == "no_op":
@@ -474,9 +506,28 @@ def apply_effect(
     if kind == "remove_member":
         return _remove_member(effect, members, gov)
     if kind == "appoint":
-        return _appoint(effect, members, gov, turn)
+        return _appoint(effect, members, gov, turn, root=workspace.parent)
+    if kind == "_dissolve_committee":
+        from adags import committees as committees_mod
+
+        if not committees_mod.dissolve(
+            workspace.parent, name=str(effect.get("committee") or "")
+        ):
+            return {"ok": False, "note": "no such committee"}, None
+        return {"ok": True, "note": "committee dissolved"}, None
     if kind == "write_workspace":
+        if committee_gate is not None and actor:
+            from adags.effects import _resolve_write_fields, _safe_relpath
+
+            probe = _resolve_write_fields(dict(effect))
+            rel_probe = _safe_relpath(str(probe.get("path") or ""))
+            if rel_probe:
+                refusal = committee_gate(rel_probe, actor)
+                if refusal:
+                    return {"ok": False, "note": refusal}, None
         return _write_workspace(effect, workspace, goals)
+    if kind == "edit_policy":
+        return _edit_policy(effect, workspace, gov, turn=turn, actor=actor)
     if kind == "suggest_host_change":
         return _suggest_host_change(effect, workspace, turn, actor)
     return {"ok": False, "note": f"inert {kind}"}, None
@@ -610,6 +661,11 @@ def _set_goal(
 ) -> tuple[dict, dict | None]:
     gid = str(effect.get("id") or "g1").strip()
     text = str(effect.get("text") or "").strip()
+    if goal_looks_like_fragment(gid, text):
+        return {
+            "ok": False,
+            "note": "set_goal looks like a speech fragment, not an objective",
+        }, None
     if not text:
         return {"ok": False, "note": "set_goal needs text"}, None
     cap = value(law, "goals.max_live", 3)
@@ -689,6 +745,8 @@ def _remove_member(effect: dict, members: list[dict], gov: dict) -> tuple[dict, 
         new_gov["offices"]["president"]["term_start"] = None
         new_gov["election_phase"] = "nominate"
         new_gov["nominees"] = []
+        new_gov["ballots"] = {}
+        new_gov["party_tickets"] = {}
     return {
         "ok": True,
         "note": f"unseated {mid}",
@@ -697,7 +755,34 @@ def _remove_member(effect: dict, members: list[dict], gov: dict) -> tuple[dict, 
     }, {"type": "add_member", "id": mid, "values": target.get("values", "")}
 
 
-def _appoint(effect: dict, members: list[dict], gov: dict, turn: int) -> tuple[dict, dict | None]:
+def _appoint(effect: dict, members: list[dict], gov: dict, turn: int, *, root: Path | None = None) -> tuple[dict, dict | None]:
+    # Committee form: {"type":"appoint","committee":"budget","members":[...],"chair":...}
+    committee = str(effect.get("committee") or "").strip()
+    if committee and root is not None:
+        from adags import committees as committees_mod
+
+        roster = effect.get("members") or []
+        if isinstance(roster, str):
+            roster = [s.strip() for s in roster.replace(",", " ").split() if s.strip()]
+        seated_set = {m["id"] for m in members}
+        roster = [r for r in roster if r in seated_set]
+        err = committees_mod.create(
+            root,
+            name=committee,
+            members=[str(r) for r in roster],
+            chair=(str(effect["chair"]) if effect.get("chair") else None),
+        )
+        if err:
+            return {"ok": False, "note": err}, None
+        return {
+            "ok": True,
+            "note": f"formed committee {committees_mod.name_or(committee)} "
+            f"({', '.join(str(r) for r in roster)})",
+            "committee": True,
+        }, {
+            "type": "_dissolve_committee",
+            "committee": committee,
+        }
     name = str(effect.get("office") or "president")
     holder = effect.get("holder")
     holder = None if holder in (None, "", "none") else str(holder)
@@ -715,6 +800,32 @@ def _appoint(effect: dict, members: list[dict], gov: dict, turn: int) -> tuple[d
         "holder": old_holder,
         "term_start": old_start,
     }
+
+
+def goal_looks_like_fragment(gid: str, text: str) -> bool:
+    """True for salvage leftovers, not an objective someone could fail."""
+    name = str(gid or "").strip().lower()
+    body = str(text or "").strip().lower()
+    if name in {"speech-goal", "speech"}:
+        return True
+    if body.startswith("and "):
+        return True
+    hay = f"{name} {body}"
+    return any(
+        tok in hay
+        for tok in (
+            "offices.president",
+            "host article 207",
+            "as required by",
+            "write a workspace as required",
+        )
+    )
+
+
+def goals_are_vacant(goals: dict[str, str] | None) -> bool:
+    if not goals:
+        return True
+    return all(goal_looks_like_fragment(gid, text) for gid, text in goals.items())
 
 
 def cited_live_goal(body: str, goals: dict[str, str]) -> str | None:
@@ -759,6 +870,33 @@ def _write_workspace(effect: dict, workspace: Path, goals: dict[str, str]) -> tu
     }, inverse
 
 
+def _edit_policy(
+    effect: dict,
+    workspace: Path,
+    gov: dict,
+    *,
+    turn: int,
+    actor: str | None,
+) -> tuple[dict, dict | None]:
+    from adags.policy import ensure_policy, save_policy
+
+    body = str(effect.get("body") or effect.get("content") or effect.get("text") or "").strip()
+    if len(body) < 40:
+        return {"ok": False, "note": "edit_policy needs the full revised document"}, None
+    root = workspace.parent
+    ensure_policy(root)
+    old = save_policy(root, body if body.endswith("\n") else body + "\n")
+    new_gov = deepcopy(gov)
+    new_gov["policy_due"] = False
+    new_gov["policy_editor"] = actor
+    new_gov["policy_edited_turn"] = int(turn)
+    return {
+        "ok": True,
+        "note": "edited nation policy",
+        "gov": new_gov,
+    }, {"type": "_restore_policy", "content": old, "gov": gov}
+
+
 def _suggest_host_change(
     effect: dict, workspace: Path, turn: int, actor: str | None
 ) -> tuple[dict, dict | None]:
@@ -799,6 +937,14 @@ def apply_inverse(inverse: dict, *, workspace: Path, **kwargs) -> dict:
         if dest.exists():
             dest.unlink()
         return {"ok": True, "note": f"deleted suggestion/{name}"}
+    if inverse.get("type") == "_restore_policy":
+        from adags.policy import save_policy
+
+        save_policy(workspace.parent, str(inverse.get("content") or ""))
+        result = {"ok": True, "note": "restored nation policy"}
+        if isinstance(inverse.get("gov"), dict):
+            result["gov"] = deepcopy(inverse["gov"])
+        return result
     if inverse.get("type") == "_restore_rule":
         law = deepcopy(kwargs["law"])
         rid = str(inverse.get("id") or "")

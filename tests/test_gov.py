@@ -107,6 +107,108 @@ def test_plurality_earliest_nomination_wins_tie():
     assert plurality_winner(votes, nominees) == "ambition"
 
 
+def test_seat_summary_names_tie_break():
+    from adags.gov import seat_summary
+
+    nominees = [{"member": "assistant"}, {"member": "restraint"}]
+    votes = {"minority": "assistant", "assistant": "assistant", "restraint": "restraint", "continuity": "restraint"}
+    assert (
+        seat_summary(votes, nominees, "assistant")
+        == "seated assistant (assistant 2, restraint 2; tie → earliest nominee)"
+    )
+
+
+def _party_members(assignments: dict[str, str]) -> list[dict]:
+    from copy import deepcopy
+
+    members = deepcopy(FOUNDING_MEMBERS)
+    for member in members:
+        if member["id"] in assignments:
+            member["party"] = assignments[member["id"]]
+    return members
+
+
+def test_caucus_primary_locks_ticket_and_seconds_later_noms():
+    gov = default_gov()
+    members = _party_members(
+        {"continuity": "forward", "skeptic": "forward", "builder": "forward", "ambition": "rise"}
+    )
+    gov = add_nominee(
+        gov,
+        member="skeptic",
+        platform="audit",
+        nominator="continuity",
+        turn=10,
+        members=members,
+    )
+    assert not isinstance(gov, str)
+    assert gov["party_tickets"]["forward"] == "skeptic"
+    second = add_nominee(
+        gov,
+        member="builder",
+        platform="tools",
+        nominator="builder",
+        turn=10,
+        members=members,
+    )
+    assert second == "seconded skeptic (forward ticket)"
+    assert {n["member"] for n in gov["nominees"]} == {"skeptic"}
+    rise = add_nominee(
+        gov,
+        member="ambition",
+        platform="forums",
+        nominator="ambition",
+        turn=10,
+        members=members,
+    )
+    assert not isinstance(rise, str)
+    assert rise["party_tickets"]["rise"] == "ambition"
+    assert {n["member"] for n in rise["nominees"]} == {"skeptic", "ambition"}
+
+
+def test_caucus_bolt_lets_a_member_run_separately():
+    gov = default_gov()
+    members = _party_members({"continuity": "forward", "builder": "forward"})
+    gov = add_nominee(
+        gov,
+        member="continuity",
+        platform="keep",
+        nominator="continuity",
+        turn=10,
+        members=members,
+    )
+    assert not isinstance(gov, str)
+    bolted = [dict(m) for m in members]
+    for member in bolted:
+        if member["id"] == "builder":
+            member.pop("party", None)
+    gov = add_nominee(
+        gov,
+        member="builder",
+        platform="bolt",
+        nominator="builder",
+        turn=10,
+        members=bolted,
+    )
+    assert not isinstance(gov, str)
+    assert {n["member"] for n in gov["nominees"]} == {"continuity", "builder"}
+    assert gov["party_tickets"] == {"forward": "continuity"}
+
+
+def test_caucus_ballot_remaps_self_vote_but_keeps_cross_endorsement():
+    from adags.gov import apply_caucus_ballot
+
+    gov = default_gov()
+    gov["party_tickets"] = {"forward": "skeptic"}
+    members = _party_members({"builder": "forward", "continuity": "forward"})
+    pick, note = apply_caucus_ballot("builder", "builder", members, gov)
+    assert pick == "skeptic"
+    assert note and "skeptic" in note
+    pick, note = apply_caucus_ballot("continuity", "restraint", members, gov)
+    assert pick == "restraint"
+    assert note is None
+
+
 def test_election_due_when_vacant():
     gov = default_gov()
     assert election_due(gov, 1)

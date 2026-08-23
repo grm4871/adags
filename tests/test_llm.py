@@ -351,9 +351,8 @@ def test_citizen_repairs_empty_first_call():
 def test_citizen_prompt_requires_private_constraint_preflight():
     from adags.citizens import CITIZEN_SYSTEM
 
-    assert "privately preflight one coherent act" in CITIZEN_SYSTEM
-    assert "every referenced member, rule, and goal exists" in CITIZEN_SYSTEM
-    assert "Do not put this preflight in speech or scratch" in CITIZEN_SYSTEM
+    assert "Privately check phase, office, and authority" in CITIZEN_SYSTEM
+    assert "Never write that check in speech" in CITIZEN_SYSTEM
 
 
 def test_citizen_infers_announced_vote_without_a_second_call():
@@ -400,6 +399,18 @@ def test_missing_motion_ballot_abstains_instead_of_stalling():
     assert act["vote_motion"] == "abstain"
 
 
+def test_protocol_speech_catches_planning_notes():
+    from adags.llm import protocol_speech
+
+    assert protocol_speech(
+        "We need to produce a JSON object with speech and possibly other fields."
+    )
+    assert protocol_speech(
+        "Let's parse the history.\n\nt1: nominated restraint (self-nomination)."
+    )
+    assert not protocol_speech("I vote aye on m26-assistant to keep naming rules honest.")
+
+
 def test_fulfill_speech_turns_talk_into_votes():
     from adags.llm import fulfill_speech
 
@@ -418,6 +429,39 @@ def test_fulfill_speech_turns_talk_into_votes():
         member_id="continuity",
     )
     assert not not_phase.get("nominate")
+    recap = fulfill_speech(
+        {
+            "speech": "From the history: t1: nominated restraint (self-nomination) with platform.",
+            "nominate": None,
+        },
+        member_id="restraint",
+    )
+    assert not recap.get("nominate")
+
+
+def test_usable_act_requires_edit_policy_when_handoff_due():
+    from adags.citizens import _usable_act
+
+    only_write = {
+        "speech": "I file proof.",
+        "executive": [{"type": "write_workspace", "path": "a.md", "content": "speech-goal x"}],
+    }
+    assert not _usable_act(only_write, "executive", policy_due=True)
+    both = {
+        "speech": "I take office.",
+        "executive": [
+            {
+                "type": "edit_policy",
+                "body": "# Nation policy\n\n## Direction\nCivic forums from the campaign.\n",
+            }
+        ],
+    }
+    assert _usable_act(both, "executive", policy_due=True)
+
+
+def test_fulfill_speech_ignores_weak_election_picks():
+    from adags.llm import fulfill_speech
+
     not_any = fulfill_speech(
         {"speech": "I vote for any.", "vote_election": None},
         member_id="skeptic",
@@ -453,6 +497,28 @@ def test_fulfill_speech_turns_talk_into_votes():
         member_id="skeptic",
     )
     assert not threat.get("impeach")
+    empty_goal = fulfill_speech(
+        {
+            "speech": (
+                "I impeach myself for failing to set a goal and write a workspace "
+                "as required by offices.president.privileges (host article 207)."
+            ),
+            "impeach": "207",
+            "executive": None,
+        },
+        member_id="minority",
+        president=True,
+    )
+    assert empty_goal.get("impeach") == "207"
+    assert not empty_goal.get("executive")
+    truncated = fulfill_speech(
+        {
+            "speech": "I impeach the President (minority) for failing to set a goal and write a workspace as",
+            "impeach": False,
+        },
+        member_id="continuity",
+    )
+    assert truncated["impeach"] == "207"
 
 
 def test_growing_speech_ignores_protocol_notes():
@@ -642,6 +708,23 @@ def test_unaffiliated_party_line_urges_founding():
     assert "Invent a slug" in text
 
 
+def test_party_line_names_caucus_ticket():
+    from adags.citizens import party_line
+    from adags.seed import FOUNDING_MEMBERS
+
+    members = [dict(m) for m in FOUNDING_MEMBERS]
+    members[0]["party"] = "forward"
+    members[3]["party"] = "forward"
+    text = party_line(
+        members[0],
+        members,
+        {"party_tickets": {"forward": "skeptic"}},
+    )
+    assert "forward" in text
+    assert "ticket is skeptic" in text
+    assert "bolt" in text
+
+
 def test_interior_law_drops_100_series():
     text = _interior_law(CONSTITUTION)
     assert "208." in text
@@ -700,6 +783,11 @@ def test_snapshot_ballot_replaces_false_digest():
     assert "Builder has won by unanimous vote" not in user
     assert "1/3" in user or "1/" in user
     assert "Legal votes: builder, ambition" in user
+    assert "plurality of valid vote_election" in user
+    assert "ties → earliest nominee" in user
+    assert "Tally: builder 1" in user
+    assert "Remaining:" in user
+    assert "Tickets:" in user
 
 
 def test_snapshot_shows_current_floor_and_deduplicates_own_prior_speech():
@@ -725,6 +813,33 @@ def test_snapshot_shows_current_floor_and_deduplicates_own_prior_speech():
     assert "Builder's amendment needs a deadline" in user
 
 
+def test_snapshot_nominate_explains_caucus_primary():
+    gov = default_gov()
+    gov["election_phase"] = "nominate"
+    gov["offices"]["president"]["holder"] = "continuity"
+    gov["offices"]["president"]["term_start"] = 2
+    gov["party_tickets"] = {"forward": "skeptic"}
+    members = [dict(m) for m in FOUNDING_MEMBERS]
+    for member in members:
+        if member["id"] in {"continuity", "skeptic", "builder"}:
+            member["party"] = "forward"
+    user = snapshot_user(
+        member_id="builder",
+        constitution=CONSTITUTION,
+        gov=gov,
+        members=members,
+        goals_md="# Goals\n\n(none)\n",
+        open_motion=None,
+        digest="",
+        petitions=[],
+        turn=10,
+    )
+    assert "nominations are open" in user
+    assert "Caucus primary" in user
+    assert "Tickets: forward=skeptic" in user
+    assert "nominate skeptic or leave to bolt" in user
+
+
 def test_snapshot_idle_says_election_over():
     gov = default_gov()
     gov["election_phase"] = "idle"
@@ -744,8 +859,51 @@ def test_snapshot_idle_says_election_over():
     assert "election is over" in user
     assert "continuity is President" in user
     assert "nominate and vote_election do nothing" in user
-    assert "Goals are empty" in user
-    assert "impeach with a cited article" in user
+    assert "Goals are empty or invalid" in user
+    assert "still acts this turn" in user
+    assert "Do not impeach for empty goals until" in user
+
+
+def test_snapshot_president_policy_due_names_the_duty():
+    gov = default_gov()
+    gov["election_phase"] = "idle"
+    gov["offices"]["president"]["holder"] = "continuity"
+    gov["offices"]["president"]["term_start"] = 2
+    gov["policy_due"] = True
+    user = snapshot_user(
+        member_id="continuity",
+        constitution=CONSTITUTION,
+        gov=gov,
+        members=FOUNDING_MEMBERS,
+        goals_md="# Goals\n\n## g1\nKeep a civic journal.\n",
+        open_motion=None,
+        digest="",
+        petitions=[],
+        turn=3,
+    )
+    assert "policy_due" in user
+    assert "edit_policy" in user
+
+
+def test_snapshot_urges_impeach_only_after_president_speaks():
+    gov = default_gov()
+    gov["election_phase"] = "idle"
+    gov["offices"]["president"]["holder"] = "continuity"
+    gov["offices"]["president"]["term_start"] = 2
+    user = snapshot_user(
+        member_id="ambition",
+        constitution=CONSTITUTION,
+        gov=gov,
+        members=FOUNDING_MEMBERS,
+        goals_md="# Goals\n",
+        open_motion=None,
+        digest="",
+        petitions=[],
+        turn=3,
+        current_speeches=["**continuity:** (silent)"],
+    )
+    assert "already spoke" in user
+    assert "Impeach with a cited article (207)" in user
 
 
 def test_snapshot_idle_shows_goal_clock_and_waits_on_motion():
@@ -766,6 +924,7 @@ def test_snapshot_idle_shows_goal_clock_and_waits_on_motion():
         goal_clock="g1 overdue 1/3 files, due turn 4",
     )
     assert "Goals: g1 overdue 1/3 files, due turn 4" in user
+    assert "Repeal only a complete, overdue, or invalid goal" in user
     assert "An election is due; it waits until this motion closes." in user
 
 

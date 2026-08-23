@@ -428,6 +428,47 @@ def test_founding_election_and_executive(tmp_path):
     assert (state.workspace / "founding.md").read_text() == "We exist. g1"
 
 
+def test_new_president_edits_inherited_policy(tmp_path):
+    from adags.policy import load_policy
+
+    state = init_run(tmp_path / "run", turn_cap=4, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "ambition", 1))
+    state.write_goals({"g1": "Publish a founding note."})
+    plat = state.workspace / "platforms"
+    plat.mkdir(parents=True, exist_ok=True)
+    (plat / "ambition.md").write_text(
+        "# Platform: ambition\n\nestablish civic forums and file proof.\n",
+        encoding="utf-8",
+    )
+    body = (
+        "# Nation policy\n\n## Direction\n"
+        "Civic forums from the campaign that seated ambition.\n\n"
+        "## Commitments\nFile proof toward g1.\n\n## Memory\nInherited founding brief; kept the frame.\n"
+    )
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": f"{mid} after the seating.",
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": (
+                    [{"type": "edit_policy", "body": body}] if mid == "ambition" else None
+                ),
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    assert "Civic forums from the campaign" in load_policy(state.root)
+    assert state.gov().get("policy_due") is False
+    assert state.gov().get("policy_editor") == "ambition"
+    digest = state.path("journal.md").read_text(encoding="utf-8")
+    assert "edited nation policy" in digest
+    assert "Civic forums from the campaign" not in digest
+
+
 def test_seat_then_add_member_motion(tmp_path):
     state = init_run(tmp_path / "run", turn_cap=6, usd_cap=1.0)
     state.write_gov(seat_president(state.gov(), "ambition", 1))
@@ -817,3 +858,137 @@ def test_cited_impeach_vacates_and_journals_the_article(tmp_path):
     digest = state.path("journal.md").read_text(encoding="utf-8")
     assert "skeptic (303)" in digest
     assert "VACATED" in digest
+
+
+def test_207_marks_ignored_if_president_fills_empty_register(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=3, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "ambition", 1))
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        scripts.append(
+            {
+                "speech": (
+                    "I set goal2: keep a live objective."
+                    if mid == "ambition"
+                    else f"{mid} impeaches under 207."
+                ),
+                "nominate": None,
+                "vote_election": None,
+                "impeach": False if mid == "ambition" else "207",
+                "propose": None,
+                "vote_motion": None,
+                "executive": (
+                    [{"type": "set_goal", "id": "goal2", "text": "keep a live objective."}]
+                    if mid == "ambition"
+                    else None
+                ),
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    assert state.gov()["offices"]["president"]["holder"] == "ambition"
+    assert state.goals().get("goal2")
+    digest = state.path("journal.md").read_text(encoding="utf-8")
+    assert "207 marks ignored" in digest
+    assert "VACATED" not in digest
+
+
+def test_caucus_primary_collapses_self_noms_and_self_votes(tmp_path):
+    from adags.gov import apply_party
+
+    state = init_run(tmp_path / "run", turn_cap=10, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "continuity", 1))
+    state.write_goals({"goal1": "Keep a live objective."})
+    _short_term(state)
+    ctl = state.control()
+    ctl["turn"] = 6
+    state.write_control(ctl)
+    members = state.members()
+    for mid in ("continuity", "skeptic", "builder"):
+        members = apply_party(members, mid, "forward")
+    members = apply_party(members, "ambition", "rise")
+    state.write_members(members)
+
+    nominate = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        nominate.append(
+            {
+                "speech": f"{mid} files.",
+                "nominate": {
+                    "member": "skeptic" if mid == "continuity" else mid,
+                    "platform": f"{mid}'s case",
+                },
+                "vote_election": None,
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=nominate))
+    gov = state.gov()
+    assert gov["election_phase"] == "nominate"
+    assert gov["party_tickets"]["forward"] == "skeptic"
+    assert gov["party_tickets"]["rise"] == "ambition"
+    assert {n["member"] for n in gov["nominees"]} == {"skeptic", "ambition", "restraint"}
+
+    ballot = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        ballot.append(
+            {
+                "speech": f"{mid} votes.",
+                "nominate": None,
+                "vote_election": mid,
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=ballot))
+    assert state.gov()["offices"]["president"]["holder"] == "skeptic"
+    digest = state.path("journal.md").read_text(encoding="utf-8")
+    assert "seated skeptic" in digest
+    assert "skeptic 3" in digest
+
+
+def test_digest_names_earliest_nominee_on_a_tie(tmp_path):
+    state = init_run(tmp_path / "run", turn_cap=8, usd_cap=1.0)
+    state.write_gov(seat_president(state.gov(), "continuity", 1))
+    state.write_goals({"goal1": "Keep a live objective."})
+    _short_term(state)
+    ctl = state.control()
+    ctl["turn"] = 6
+    state.write_control(ctl)
+    gov = state.gov()
+    gov["election_phase"] = "ballot"
+    gov["nominees"] = [
+        {"member": "builder", "platform": "tools", "nominator": "builder", "turn": 1},
+        {"member": "ambition", "platform": "go", "nominator": "ambition", "turn": 1},
+    ]
+    state.write_gov(gov)
+    picks = {
+        "continuity": "builder",
+        "ambition": "ambition",
+        "restraint": "builder",
+        "skeptic": "ambition",
+        "builder": None,
+    }
+    scripts = []
+    for mid in ["continuity", "ambition", "restraint", "skeptic", "builder"]:
+        pick = picks[mid]
+        scripts.append(
+            {
+                "speech": f"{mid} votes.",
+                "nominate": None,
+                "vote_election": {"member": pick} if pick else "abstain",
+                "impeach": False,
+                "propose": None,
+                "vote_motion": None,
+                "executive": None,
+            }
+        )
+    run_turn(state, ScriptedLLM(scripts=scripts))
+    assert state.gov()["offices"]["president"]["holder"] == "builder"
+    digest = state.path("journal.md").read_text(encoding="utf-8")
+    assert "tie → earliest nominee" in digest
+    assert "seated builder" in digest

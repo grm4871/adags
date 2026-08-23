@@ -11,14 +11,17 @@ from pathlib import Path
 
 BRIEF_SYSTEM = """You are the clerk of record for ADAGS, not a citizen and not a legislator.
 
-Write a chamber brief of at most 220 words. Only what the host actually did:
-who holds office; whether an election or impeachment happened; which files were
-written and whether they have a body; which bills executed; which were already
-law, reserved to the President, or empty; how many live goals sit on the
-register; who is blocking whom.
+Write a chamber brief of at most 220 words. Trust the FACTS block over any
+earlier clerk recap or speech. Only what the host actually did:
+who holds office; whether an election or impeachment happened this window;
+which files exist and whether their body names a live goal id; which bills
+executed; how many live goals sit on the register and their exact titles;
+who is blocking whom.
 
-Do not quote articles back. Do not recommend a new 30x. Do not recap every
-speech. If the world did not change, say that in one sentence.
+Do not say an election did not occur if FACTS records a seating. Do not say a
+repealed goal is still live. Do not quote articles back. Do not recommend a
+new 30x. Do not recap every speech. If the world did not change, say that in
+one sentence.
 """
 
 
@@ -39,11 +42,83 @@ def due(turn: int) -> bool:
     return n > 0 and int(turn) > 0 and int(turn) % n == 0
 
 
+def strip_clerk_preamble(block: str) -> str:
+    """Keep the mechanical digest; drop a prior clerk recap that may be stale."""
+    text = (block or "").strip()
+    if "\n---\n" in text:
+        text = text.rsplit("\n---\n", 1)[1].strip()
+    if text.lstrip().startswith("# Clerk brief"):
+        return ""
+    return text
+
+
 def recent_journal(text: str, *, turns: int = 4, each: int = 1600) -> str:
     blocks = re.split(r"(?=^## Turn \d+)", text or "", flags=re.M)
     chunks = [b.strip() for b in blocks if b.strip().startswith("## Turn")]
     picked = chunks[-turns:]
-    return "\n\n".join(c[:each] for c in picked)
+    cleaned = [strip_clerk_preamble(c)[:each] for c in picked]
+    return "\n\n".join(c for c in cleaned if c)
+
+
+def host_facts(state, turn: int) -> str:
+    """Mechanical truth the clerk must not contradict."""
+    bits: list[str] = [f"Turn {turn}."]
+    gov: dict = {}
+    try:
+        gov = state.gov() or {}
+    except Exception:
+        gov = {}
+    try:
+        from adags.gov import president_id
+
+        prez = president_id(gov) or "(vacant)"
+    except Exception:
+        prez = (gov.get("offices") or {}).get("president", {}).get("holder") or "(vacant)"
+    start = ((gov.get("offices") or {}).get("president") or {}).get("term_start")
+    bits.append(f"President: {prez} (term_start {start}).")
+    if start is not None:
+        try:
+            if int(turn) - 3 <= int(start) <= int(turn):
+                bits.append(f"An election seated {prez} on turn {start}.")
+        except (TypeError, ValueError):
+            pass
+    try:
+        goals = state.goals() or {}
+    except Exception:
+        goals = {}
+    if goals:
+        bits.append("Live goals: " + "; ".join(f"{gid}={text}" for gid, text in goals.items()))
+    else:
+        bits.append("Live goals: (none).")
+    try:
+        workspace = state.workspace
+    except Exception:
+        workspace = None
+    if workspace is not None and getattr(workspace, "exists", lambda: False)():
+        files = []
+        for path in sorted(workspace.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workspace).as_posix()
+            if rel.startswith("platforms/"):
+                continue
+            try:
+                body = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            named = [gid for gid in goals if gid.lower() in (body + "\n" + rel).lower()]
+            files.append(
+                f"{rel} body={'yes' if body.strip() else 'no'}"
+                + (f" names {', '.join(named)}" if named else " names none")
+            )
+        bits.append("Workspace: " + "; ".join(files[:8]) if files else "Workspace: (empty).")
+    try:
+        last = state.control().get("last_act_id")
+        if last:
+            bits.append(f"Last host act: {last}.")
+    except Exception:
+        pass
+    return "\n".join(bits)
 
 
 def extract_last_message(raw: str) -> str:
@@ -113,7 +188,13 @@ def maybe_clerk_brief(
     path = state.path("journal.md")
     if path.exists():
         journal = recent_journal(path.read_text(encoding="utf-8", errors="replace"))
-    user = (journal or mechanical or "").strip()
+    facts = host_facts(state, turn)
+    parts = [f"FACTS:\n{facts}"]
+    if journal:
+        parts.append(f"MECHANICAL DIGESTS:\n{journal}")
+    if mechanical:
+        parts.append(f"THIS TURN:\n{mechanical}")
+    user = "\n\n".join(parts).strip()
     if not user:
         return None
     fn = runner or run_codex_brief
@@ -145,4 +226,4 @@ def digest_for_card(digest: str, *, exclude_member: str | None = None) -> str:
             re.MULTILINE | re.DOTALL,
         )
         text = own.sub("", text)
-    return text.strip()[-3200:] or "(none)"
+    return text.strip()[-1600:] or "(none)"

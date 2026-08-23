@@ -98,7 +98,16 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     root = _root(args)
     if not (root / "control.json").exists():
-        init_run(root, turn_cap=args.turn_cap, usd_cap=args.usd_cap if args.usd_cap is not None else 1.0)
+        found = args.seed if args.seed is not None else "random"
+        init_run(
+            root,
+            turn_cap=args.turn_cap if args.turn_cap is not None else 12,
+            usd_cap=args.usd_cap if args.usd_cap is not None else 1.0,
+            found=found,
+        )
+        from adags.render import status_block
+
+        print(status_block(RunState(root)), flush=True)
     state = RunState(root)
     _run_turns(
         state,
@@ -236,6 +245,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--usd-cap", type=float, default=None, help="hard spend cap (default $1 on init)")
     s.add_argument("--max-seconds", type=float, default=None, help="stop this invocation after N seconds")
     s.add_argument("--mock", action="store_true", help="scripted agents, no API")
+    s.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="reproducible random founding (default: unique roll on init)",
+    )
     s.add_argument(
         "--provider",
         default=None,

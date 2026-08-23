@@ -10,11 +10,26 @@ from typing import Any
 
 from adags.brief import brief_every, maybe_clerk_brief
 from adags.citizens import citizen_act, clerk_compile, snapshot_user
+from adags.policy import campaign_text, ensure_policy, policy_card
+from adags.whispers import (
+    append_log,
+    format_inbox,
+    format_whisper_log,
+    load_hold,
+    parse_whisper,
+    save_hold,
+)
+from adags.relations import format_standing, update_from_act
+from adags.treasury import card as treasury_card
+from adags.treasury import gate_add_member, init as treasury_init, settle as treasury_settle
+from adags import committees as committees_mod
+from adags import questions as questions_mod
+from adags import terms as terms_mod
+from adags.opposition import opposition_card, opposition_id
 from adags.constitution import apply_to_runtime, identical_charter_line, value
 from adags.memory import (
     append_record,
     compose_user,
-    count_goal_named_files,
     goal_clock,
     load_records,
     patch_last_record,
@@ -27,6 +42,7 @@ from adags.effects import (
     coerce_effects,
     bill_title,
     complete_set_goal,
+    goals_are_vacant,
     inert_motion_note,
     path_in_prose,
     propose_effects,
@@ -35,6 +51,7 @@ from adags.effects import (
 from adags.gov import (
     add_nominee,
     advance_phase,
+    apply_caucus_ballot,
     apply_party,
     as_impeach,
     as_member_id,
@@ -46,6 +63,7 @@ from adags.gov import (
     plurality_winner,
     president_id,
     seat_president,
+    seat_summary,
     threshold,
     vacate_president,
 )
@@ -153,11 +171,17 @@ def _apply_many(
     actor: str | None,
     source: str,
     act_id: str,
-) -> list[dict]:
+    committee_gate=None,
+) -> list[str]:
     law = state.law()
     goals = state.goals()
     members = state.members()
     gov = state.gov()
+    # Insolvency gate: the host refuses to seat new members it cannot pay.
+    if any(isinstance(e, dict) and e.get("type") == "add_member" for e in effects):
+        refusal = gate_add_member(state.root, law=law)
+        if refusal:
+            return [refusal]
     inverses = []
     notes = []
     applied = False
@@ -172,11 +196,27 @@ def _apply_many(
             turn=state.control()["turn"],
             actor=actor,
             source=source,
+            committee_gate=committee_gate,
         )
         notes.append(result.get("note", ""))
         if not result.get("ok"):
             continue
         applied = True
+        # Term record: set_goal texts are promises; written files are delivery.
+        if source == "executive" and actor:
+            if effect.get("type") == "set_goal":
+                terms_mod.add_promise(
+                    state.root, holder=actor, text=str(effect.get("text") or "")
+                )
+            elif effect.get("type") == "write_workspace":
+                from adags.effects import _resolve_write_fields, _safe_relpath
+
+                probe = _resolve_write_fields(dict(effect))
+                rel_done = _safe_relpath(str(probe.get("path") or ""))
+                if rel_done:
+                    terms_mod.mark_delivered(
+                        state.root, holder=actor, rel_path=rel_done
+                    )
         if "law" in result:
             law = result["law"]
             state.write_law(law)
@@ -275,7 +315,15 @@ def _motion_threshold(law: dict, motion: dict, gov: dict) -> str:
     return str(gov.get("vote_rule") or value(law, "motion.threshold", "majority"))
 
 
-def _enact_motion(state: RunState, llm: LLM, control: dict, motion: dict, votes: dict) -> list[str]:
+def _enact_motion(
+    state: RunState,
+    llm: LLM,
+    control: dict,
+    motion: dict,
+    votes: dict,
+    *,
+    committee_gate=None,
+) -> list[str]:
     """Apply structured effects; if none take, let the clerk compile the text."""
     notes: list[str] = []
     act_id = str(motion.get("id") or "motion")
@@ -371,11 +419,17 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     members = state.members()
     constitution = state.constitution()
     goals = state.goals()
+    vacant = goals_are_vacant(goals)
+    register_was_empty = vacant
     digest = state.last_digest()
     petitions = state.petitions()
     clock = goal_clock(goals, state.workspace, turn, meta=state.goals_meta())
     identical = identical_charter_line(law)
-    seat_nudge = len(members) <= 5 and count_goal_named_files(state.workspace, goals) >= 2
+    unaffiliated = [m for m in members if not str(m.get("party") or "").strip()]
+    seat_nudge = bool(
+        (election_due(gov, turn) or gov.get("election_phase") in {"nominate", "ballot"})
+        and len(members) < 10
+    ) or (len(unaffiliated) >= 1 and len(members) <= 7)
 
     progress = _load_turn_progress(state, turn)
     floor = speaking_order(
@@ -392,8 +446,83 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
     impeach_charges: dict[str, str] = dict(progress.get("impeach_charges") or {})
     exec_notes: list[str] = list(progress.get("exec_notes") or [])
     completed = set(progress.get("completed") or [])
+    inbox: dict[str, list[dict]] = {
+        str(mid): list(notes)
+        for mid, notes in (progress.get("inbox") or {}).items()
+        if isinstance(notes, list)
+    }
+    if not inbox and not completed:
+        inbox = load_hold(state.root)
+        save_hold(state.root, {})
+    whispered: list[dict] = list(progress.get("whispers") or [])
+    late_hold: dict[str, list[dict]] = {
+        str(mid): list(notes)
+        for mid, notes in (progress.get("late_hold") or {}).items()
+        if isinstance(notes, list)
+    }
+    questions_this_turn: list[dict] = []
+    questions_late: dict[str, list[dict]] = {}
+    question_inbox: dict[str, list[dict]] = {
+        str(mid): list(notes)
+        for mid, notes in (progress.get("question_inbox") or {}).items()
+        if isinstance(notes, list)
+    }
+    if not question_inbox and not completed:
+        question_inbox = questions_mod.load_hold(state.root)
+        questions_mod.save_hold(state.root, {})
     interrupted = False
     n_members = len(members)
+    law_now = state.law()
+    treasury_init(state.root, law=law_now)
+    # Term rhythm: how many turns until the next election is due.
+    prez_now = president_id(gov)
+    term_start = ((gov.get("offices") or {}).get("president") or {}).get("term_start")
+    term_len = int(gov.get("term_length") or 8)
+    turns_to_election = (
+        max(0, int(term_start) + term_len - turn)
+        if prez_now and term_start is not None
+        else 0
+    )
+    session_note = ""
+    if prez_now and turns_to_election:
+        if turns_to_election <= 2:
+            session_note = (
+                f"SESSION: election is due in {turns_to_election} turn(s). "
+                "Campaigns, deals, and last pushes happen now."
+            )
+        else:
+            session_note = f"Session {turns_to_election} turns before the next election."
+    relations_file = state.root / "relations.json"
+    try:
+        relations = json.loads(relations_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        relations = {}
+    if not isinstance(relations, dict):
+        relations = {}
+
+    def _party_of(mid: str) -> str:
+        for m in members:
+            if m.get("id") == mid:
+                return str(m.get("party") or "")
+        return ""
+
+    def _member_committee_md(mid: str) -> str:
+        cards = committees_mod.committee_card(state.root)
+        mine = committees_mod.memberships_for(state.root, mid)
+        if not mine:
+            return cards
+        bits = "; ".join(
+            f"{c['name']}" + (" (chair)" if c["chair"] else "") for c in mine
+        )
+        return f"{cards}\nYou serve on: {bits}."
+
+    def _committee_gate(rel_path: str, mid: str) -> str | None:
+        return committees_mod.gate_write(
+            state.root, rel_path, mid, president=president_id(state.gov())
+        )
+
+    question_inbox = questions_mod.load_hold(state.root)
+
     turn_open(turn=turn, gov=gov, n_members=n_members, motion=motion, members=members)
 
     for member in floor:
@@ -408,6 +537,15 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             float(control["usd_cap"]) - float(control["usd_spent"]),
         )
         prior = load_records(state.root, member["id"])
+        papers = ""
+        if member["id"] == (president_id(gov) or ""):
+            papers = policy_card(
+                policy=ensure_policy(state.root),
+                campaign=campaign_text(state.workspace, member["id"]),
+                due=bool(gov.get("policy_due")),
+                editor=gov.get("policy_editor"),
+                edited_turn=gov.get("policy_edited_turn"),
+            )
         snapshot = snapshot_user(
             member_id=member["id"],
             constitution=constitution,
@@ -423,6 +561,17 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             goal_clock=clock,
             identical_line=identical,
             seat_nudge=seat_nudge,
+            office_papers=papers,
+            whispers_md=format_inbox(inbox.get(member["id"]) or []),
+            treasury_md=treasury_card(state.root, law=law_now, n_members=len(members)),
+            standing_md=format_standing(relations, member["id"], member_ids(members)),
+            committee_md=_member_committee_md(member["id"]),
+            questions_md=questions_mod.format_inbox(
+                question_inbox.get(member["id"]) or []
+            ),
+            opposition_md=opposition_card(members, gov, member_id=member["id"]),
+            term_md=terms_mod.card(state.root),
+            session_md=session_note,
         )
         user = compose_user(load_records(state.root, member["id"]), snapshot)
         citizen_open(member["id"], party=str(member.get("party") or "") or None)
@@ -432,20 +581,25 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             llm,
             member=member,
             user=user,
+            gov=gov,
             on_token=voice.feed,
             on_think=voice.feed_think,
             president=member["id"] == (president_id(gov) or ""),
             members=members,
-            goals_empty=not goals,
+            goals_empty=vacant,
+            policy_due=bool(
+                member["id"] == (president_id(gov) or "") and gov.get("policy_due")
+            ),
             required=(
-                "executive"
-                if member["id"] == (president_id(gov) or "") and not goals
-                else "vote_motion"
+                "vote_motion"
                 if motion is not None
                 else "vote_election"
                 if gov.get("election_phase") == "ballot"
                 else "nominate"
                 if gov.get("election_phase") == "nominate"
+                else "executive"
+                if member["id"] == (president_id(gov) or "")
+                and (vacant or gov.get("policy_due"))
                 else None
             ),
         )
@@ -468,35 +622,101 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             parties=member_parties(members),
         )
         host_bits: list[str] = []
+        inbox.pop(member["id"], None)
+
+        if act.get("party") is not None:
+            slug = as_party_id(act.get("party"))
+            if slug is not None:
+                members = apply_party(members, member["id"], slug)
+                state.write_members(members)
+                speeches.append(
+                    f"- {'joined ' + slug if slug else 'left party'} ({member['id']})"
+                )
+
+        got = parse_whisper(
+            act.get("whisper"),
+            sender=member["id"],
+            seated=member_ids(members),
+        )
+        if isinstance(got, dict):
+            whispered.append(got)
+            append_log(state.root, turn, got)
+            target = str(got["to"])
+            if target in completed:
+                late_hold.setdefault(target, []).append(got)
+            else:
+                inbox.setdefault(target, []).append(got)
+            host_bits.append(f"whisper {target}")
+            emit(c("35", f"  whisper → {target}: {got['body']}"))
+        elif isinstance(got, str):
+            host_bits.append(got)
+
+        # Public questions: routed to the target's next card; logged in digest.
+        asked = questions_mod.parse_question(
+            act.get("question"),
+            sender=member["id"],
+            seated=member_ids(members),
+        )
+        if isinstance(asked, dict):
+            questions_this_turn.append(asked)
+            target = str(asked["to"])
+            if target in completed:
+                questions_late.setdefault(target, []).append(asked)
+            else:
+                question_inbox.setdefault(target, []).append(asked)
+            host_bits.append(f"question to {target}")
+            emit(c("35", f"  question → {target}: {asked['body']}"))
+            speeches.append(f"- asks {target}: {asked['body'][:80]}")
+        elif isinstance(asked, str):
+            host_bits.append(asked)
 
         nom = act.get("nominate")
         if isinstance(nom, dict) and gov.get("election_phase") == "nominate":
             target = as_member_id(nom.get("member")) or as_member_id(nom)
             if target in member_ids(members):
+                from adags.llm import protocol_speech
+
+                plat = str(nom.get("platform") or "")
+                if protocol_speech(plat) or plat.count("\n") >= 2:
+                    plat = "short platform"
                 updated = add_nominee(
                     gov,
                     member=target,
-                    platform=str(nom.get("platform") or ""),
+                    platform=plat,
                     nominator=member["id"],
                     turn=turn,
+                    members=members,
+                    caucus_primary=bool(gov.get("caucus_primary", True)),
                 )
-                if not isinstance(updated, str):
+                if isinstance(updated, str):
+                    host_bits.append(updated)
+                    if updated.startswith("seconded "):
+                        speeches.append(f"- {updated}")
+                else:
                     gov = updated
                     state.write_gov(gov)
-                    plat = str(nom.get("platform") or "")
-                    dest = state.workspace / "platforms" / f"{target}.md"
+                    filed = (gov.get("nominees") or [])[-1]["member"]
+                    dest = state.workspace / "platforms" / f"{filed}.md"
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_text(f"# Platform: {target}\n\n{plat}\n", encoding="utf-8")
-                    speeches.append(f"- nominated {target}")
-                    host_bits.append(f"nominated {target}")
-                else:
-                    host_bits.append(str(updated))
+                    dest.write_text(f"# Platform: {filed}\n\n{plat}\n", encoding="utf-8")
+                    speeches.append(f"- nominated {filed}")
+                    host_bits.append(f"nominated {filed}")
             else:
                 host_bits.append("nominate ignored (not seated)")
         elif isinstance(nom, dict) and gov.get("election_phase") != "nominate":
             host_bits.append(f"nominate ignored ({gov.get('election_phase')})")
 
         vote_e = as_member_id(act.get("vote_election"))
+        if vote_e and gov.get("election_phase") == "ballot":
+            vote_e, remap_note = apply_caucus_ballot(
+                member["id"],
+                vote_e,
+                members,
+                gov,
+                caucus_primary=bool(gov.get("caucus_primary", True)),
+            )
+            if remap_note:
+                host_bits.append(remap_note)
         nominees = {n.get("member") for n in (gov.get("nominees") or [])}
         blocked = consecutive_blocked(gov)
         if vote_e and gov.get("election_phase") == "ballot":
@@ -520,15 +740,6 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             host_bits.append(f"impeach {article}")
         elif marked:
             host_bits.append("impeach ignored (cite an article)")
-
-        if act.get("party") is not None:
-            slug = as_party_id(act.get("party"))
-            if slug is not None:
-                members = apply_party(members, member["id"], slug)
-                state.write_members(members)
-                speeches.append(
-                    f"- {'joined ' + slug if slug else 'left party'} ({member['id']})"
-                )
 
         if motion is None:
             prop = act.get("propose")
@@ -554,6 +765,12 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 if blocked:
                     host_bits.append(blocked)
                 else:
+                    # Opposition privilege: the leader's motion is marked as
+                    # official opposition business in the journal.
+                    if member["id"] == opposition_id(members, gov):
+                        speeches.append(
+                            f"- opposition motion (Leader {member['id']})"
+                        )
                     title = bill_title(
                         title=str(prop.get("title") or ""),
                         text=str(prop.get("text") or ""),
@@ -584,7 +801,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 host_bits.append(f"{vm} on {motion.get('id')}")
 
         exec_fx = coerce_effects(act.get("executive"))
-        for key in ("set_goal", "write_workspace"):
+        for key in ("set_goal", "write_workspace", "edit_policy"):
             if act.get(key) is not None:
                 exec_fx.extend(coerce_effects({key: act[key]}))
         spoken = str(act.get("speech") or "")
@@ -602,8 +819,10 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             allowed = []
             for fx in exec_fx:
                 kind = (fx or {}).get("type")
-                privileges = value(state.law(), "offices.president.privileges", [])
-                if member["id"] == president_id(gov) and kind in privileges:
+                privileges = value(state.law(), "offices.president.privileges", []) or []
+                if member["id"] == president_id(gov) and (
+                    kind in privileges or kind == "edit_policy"
+                ):
                     allowed.append(fx)
                 else:
                     exec_notes.append(f"{member['id']} executive {kind} dropped (no privilege)")
@@ -615,6 +834,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                     actor=member["id"],
                     source="executive",
                     act_id=f"t{turn}-{member['id']}-exec",
+                    committee_gate=_committee_gate,
                 )
                 exec_notes.extend(notes)
                 host_bits.extend(str(n) for n in notes if n)
@@ -624,6 +844,20 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 members = state.members()
                 constitution = state.constitution()
                 goals = state.goals()
+                vacant = goals_are_vacant(goals)
+
+        update_from_act(
+            relations,
+            actor=member["id"],
+            act=act,
+            seated=member_ids(members),
+            president=president_id(gov),
+            member_party_of=_party_of,
+        )
+        try:
+            relations_file.write_text(json.dumps(relations, indent=2) + "\n", encoding="utf-8")
+        except OSError:
+            pass
 
         rec = record_from_act(turn, act)
         if host_bits:
@@ -638,6 +872,12 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
                 "impeach_votes": impeach_votes,
                 "impeach_charges": impeach_charges,
                 "exec_notes": exec_notes,
+                "inbox": inbox,
+                "question_inbox": {
+                    k: v for k, v in question_inbox.items() if v
+                },
+                "whispers": whispered,
+                "late_hold": late_hold,
             }
         )
         _write_turn_progress(state, progress)
@@ -645,29 +885,72 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             interrupted = True
             break
 
+    save_hold(state.root, late_hold)
+    questions_mod.save_hold(
+        state.root,
+        {
+            **{k: v for k, v in question_inbox.items() if v},
+            **{k: v for k, v in questions_late.items() if v},
+        },
+    )
     if interrupted:
         return f"turn {turn} checkpointed after {len(completed)}/{len(members)} citizens"
+
+    # Treasury settles once per turn, after all acts and effects.
+    treasury_notes = treasury_settle(
+        state.root,
+        law=state.law(),
+        turn=turn,
+        n_members=len(state.members()),
+        goals=state.goals(),
+        goal_clock_text=goal_clock(state.goals(), state.workspace, turn, meta=state.goals_meta()),
+    )
 
     # Impeach
     n = len(state.members())
     impeached = False
+    dropped_207: list[str] = []
+    if register_was_empty and state.goals():
+        dropped_207 = [mid for mid in impeach_votes if impeach_charges.get(mid) == "207"]
+        impeach_votes = [mid for mid in impeach_votes if mid not in set(dropped_207)]
     if value(state.law(), "impeachment.enabled", True) and impeach_votes and passes(len(impeach_votes), n, gov.get("impeach_threshold") or "majority"):
         gov = vacate_president(gov)
         state.write_gov(gov)
+        terms_mod.close_term(state.root, turn=turn)
         impeached = True
 
     # Ballot
     seated = None
+    seat_note = ""
+    ballot_noms = list(gov.get("nominees") or [])
     if gov.get("election_phase") == "ballot":
-        winner = plurality_winner(election_votes, gov.get("nominees") or [])
+        winner = plurality_winner(election_votes, ballot_noms)
         quorum = threshold(value(state.law(), "election.quorum", "majority"), n)
         blocked = consecutive_blocked(gov)
         if winner and blocked and winner == blocked:
             winner = None
         if winner and len(election_votes) >= quorum:
+            # A term ends when a successor is seated: grade the outgoing record.
+            closed_rec = terms_mod.close_term(state.root, turn=turn)
+            if closed_rec is not None:
+                speeches.append(
+                    f"- term record {closed_rec.get('holder')}: "
+                    f"platform \"{(closed_rec.get('platform') or '')[:80]}\" "
+                    f"scored {closed_rec.get('score')}"
+                )
+            seat_note = seat_summary(election_votes, ballot_noms, winner)
             gov = seat_president(gov, winner, turn)
             state.write_gov(gov)
             seated = winner
+            platform = next(
+                (
+                    str(nom.get("platform") or "")
+                    for nom in ballot_noms
+                    if nom.get("member") == winner
+                ),
+                "",
+            )
+            terms_mod.open_term(state.root, holder=winner, turn=turn, platform=platform)
 
     # Motion resolution
     motion_notes: list[str] = []
@@ -686,7 +969,7 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
             passed = passes(ayes, n, rule)
             if passed:
                 motion_notes.extend(
-                    _enact_motion(state, llm, control, motion, votes)
+                    _enact_motion(state, llm, control, motion, votes, committee_gate=_committee_gate)
                 )
             else:
                 motion_notes.append("motion failed")
@@ -716,16 +999,28 @@ def run_turn(state: RunState, llm: LLM, *, deadline: float | None = None) -> str
         *speeches,
         "",
         f"Impeach marks: {_format_impeach_marks(impeach_votes, impeach_charges)}"
-        + (" — VACATED" if impeached else ""),
+        + (" — VACATED" if impeached else "")
+        + (
+            f" — 207 marks ignored (register filled this turn): {', '.join(dropped_207)}"
+            if dropped_207
+            else ""
+        ),
         f"Election votes: {_format_election_votes(election_votes)}"
         + (
-            f" — seated {seated}"
+            f" — {seat_note}"
             if seated
             else (
                 " — still open, no seat"
                 if state.gov().get("election_phase") == "ballot"
                 else ""
             )
+        ),
+        f"Whispers: {format_whisper_log(whispered)}",
+        f"Questions: {questions_mod.log_line(questions_this_turn)}",
+        *(
+            [f"Treasury: {note}" for note in treasury_notes]
+            if treasury_notes
+            else ["Treasury: (settled, no entries)"]
         ),
         "## Executive",
         *(exec_notes or ["(none)"]),

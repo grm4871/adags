@@ -179,14 +179,14 @@ def test_unenforceable_article_becomes_chamber_law(tmp_path):
     r, _ = _apply(
         {
             "type": "amend_rule",
-            "id": "213",
+            "id": "313",
             "text": "Workspace artifacts must reference an active goal.",
             "mechanics": {"workspace.require_goal": True},
         },
         tmp_path,
     )
     assert r["ok"], r
-    assert "213" not in (r["law"].get("rules") or {})
+    assert "313" not in (r["law"].get("rules") or {})
     charter = r["law"]["charter"]
     assert any("active goal" in (a.get("text") or "") for a in charter.values())
     assert "chamber law" in r["note"]
@@ -382,6 +382,47 @@ def test_set_goal_refuses_a_fourth_slot(tmp_path):
     )
     assert replace["ok"]
     assert replace["goals"]["goal2"] == "replaced"
+
+
+def test_set_goal_rejects_speech_fragments(tmp_path):
+    from adags.gov import seat_president
+
+    gov = seat_president(default_gov(), "ambition", 1)
+    law = default_constitution()
+    bad_id, _ = apply_effect(
+        {
+            "type": "set_goal",
+            "id": "speech-goal",
+            "text": "and write a workspace as required by 207.",
+        },
+        law=law,
+        goals={},
+        members=list(FOUNDING_MEMBERS),
+        gov=gov,
+        workspace=tmp_path,
+        turn=1,
+        actor="ambition",
+        source="executive",
+    )
+    assert not bad_id["ok"]
+    assert "speech fragment" in bad_id["note"]
+    bad_text, _ = apply_effect(
+        {
+            "type": "set_goal",
+            "id": "goal2",
+            "text": "and write a workspace as required by offices.president.privileges.",
+        },
+        law=law,
+        goals={},
+        members=list(FOUNDING_MEMBERS),
+        gov=gov,
+        workspace=tmp_path,
+        turn=1,
+        actor="ambition",
+        source="executive",
+    )
+    assert not bad_text["ok"]
+    assert "speech fragment" in bad_text["note"]
 
 
 def test_write_requires_live_goal_id(tmp_path):

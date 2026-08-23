@@ -153,7 +153,15 @@ class RunState:
         return out
 
 
-def init_run(root: Path, *, turn_cap: int = 12, usd_cap: float = 3.0) -> RunState:
+def init_run(
+    root: Path,
+    *,
+    turn_cap: int = 12,
+    usd_cap: float = 3.0,
+    found: str | int | None = None,
+) -> RunState:
+    """found=None keeps the classic fixed founding (tests, repro tools).
+    found="random" rolls a unique polity; an int rolls with that seed."""
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     (root / "workspace" / "platforms").mkdir(parents=True, exist_ok=True)
@@ -162,18 +170,59 @@ def init_run(root: Path, *, turn_cap: int = 12, usd_cap: float = 3.0) -> RunStat
     (root / "suggestions").mkdir(exist_ok=True)
     state = RunState(root)
     state.write_law(state.law())
+    import random as _random
+
+    from adags.founding import roll_founding
+    from adags.constitution import set_mechanic
+
+    rolling = found == "random" or isinstance(found, int)
+    rng = _random.Random(found if isinstance(found, int) else None)
     if not state.path("goals.md").exists():
-        state.path("goals.md").write_text(GOALS_EMPTY, encoding="utf-8")
-    if not state.path("members.json").exists():
+        if rolling:
+            founding = roll_founding(rng)
+            # A founding directive seeds the register; some nations start blank.
+            if founding["directive"]:
+                _label, body = founding["directive"]
+                state.path("goals.md").write_text(
+                    f"# Goals\n\ngoal1: {body}\n", encoding="utf-8"
+                )
+            else:
+                state.path("goals.md").write_text(GOALS_EMPTY, encoding="utf-8")
+            state.write_members(founding["members"])
+            law = state.law()
+            for path_, val_ in founding["mechanics"].items():
+                law = set_mechanic(law, path_, val_)
+            state.write_law(law)
+        else:
+            state.path("goals.md").write_text(GOALS_EMPTY, encoding="utf-8")
+            state.write_members(FOUNDING_MEMBERS)
+    elif not state.path("members.json").exists():
         state.write_members(FOUNDING_MEMBERS)
     if not state.path("gov.json").exists():
-        state.write_gov(default_gov())
+        gov = default_gov()
+        try:
+            mech = {
+                k: v
+                for rule in (state.load_json("constitution.json").get("rules") or {}).values()
+                for k, v in (rule.get("mechanics") or {}).items()
+            }
+            gov["term_length"] = mech.get("election.term_length", gov["term_length"])
+            gov["caucus_primary"] = mech.get(
+                "election.caucus_primary", gov["caucus_primary"]
+            )
+            gov["vote_rule"] = mech.get("motion.threshold", gov["vote_rule"])
+        except Exception:
+            pass
+        state.write_gov(gov)
     if not state.path("control.json").exists():
         state.write_control(default_control(turn_cap=turn_cap, usd_cap=usd_cap))
     if not state.path("journal.md").exists():
         state.path("journal.md").write_text("# Journal\n\n", encoding="utf-8")
     if not state.path("acts.jsonl").exists():
         state.path("acts.jsonl").write_text("", encoding="utf-8")
+    from adags.policy import ensure_policy
+
+    ensure_policy(root)
     return state
 
 

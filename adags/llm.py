@@ -100,6 +100,7 @@ class LLM:
         on_token=None,
         on_think=None,
         prefix: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResult:
         raise NotImplementedError
 
@@ -123,8 +124,10 @@ class ChatLLM(LLM):
         self.json_mode = json_mode
         self._in_rate, self._out_rate = rates if rates is not None else _rates_for(model)
         self.timeout = float(os.environ.get("ADAGS_CALL_TIMEOUT", "60"))
-        self.think_timeout = float(os.environ.get("ADAGS_THINK_TIMEOUT", "20"))
-        self.first_token_timeout = float(os.environ.get("ADAGS_FIRST_TOKEN_TIMEOUT", "8"))
+        self.think_timeout = float(os.environ.get("ADAGS_THINK_TIMEOUT", "25"))
+        # Hermes + a 120B model often sit silent longer than 8s before the
+        # first byte. That was cutting live turns, not runaway plans.
+        self.first_token_timeout = float(os.environ.get("ADAGS_FIRST_TOKEN_TIMEOUT", "20"))
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -141,6 +144,7 @@ class ChatLLM(LLM):
         on_token=None,
         on_think=None,
         prefix: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResult:
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system},
@@ -166,7 +170,11 @@ class ChatLLM(LLM):
             timeout = completion_deadline - time.monotonic()
             if timeout <= 0:
                 return LLMResult(text="", error="wall-clock deadline reached")
-            max_tokens = int(os.environ.get("ADAGS_MAX_TOKENS", "1800"))
+            max_tokens = int(
+                max_tokens
+                if max_tokens is not None
+                else os.environ.get("ADAGS_MAX_TOKENS", "1800")
+            )
             if self.remaining_usd is not None and (self._in_rate or self._out_rate):
                 # UTF-8 bytes are a conservative upper bound on prompt tokens.
                 prompt_tokens = sum(
@@ -187,6 +195,7 @@ class ChatLLM(LLM):
                 "model": self.model,
                 "messages": msgs,
                 "max_tokens": max_tokens,
+                "temperature": 0.3,
                 "timeout": _http_timeout(
                     timeout, read=float(getattr(self, "think_timeout", 12) or 12)
                 ),
@@ -408,6 +417,7 @@ class ScriptedLLM(LLM):
         on_token=None,
         on_think=None,
         prefix: str | None = None,
+        max_tokens: int | None = None,
     ) -> LLMResult:
         if self.i < len(self.scripts):
             payload = self.scripts[self.i]
@@ -544,6 +554,48 @@ _PLANNED_SPEECH = re.compile(
 )
 
 
+def protocol_speech(speech: str) -> bool:
+    """True when the chamber line is planning notes, not remarks."""
+    s = (speech or "").strip().lower()
+    if not s:
+        return False
+    cues = (
+        "we need to output json",
+        "we need to produce a json",
+        "we need to produce json",
+        "output json with",
+        "output a json",
+        "produce a json object",
+        "we must output",
+        "let's produce",
+        "let's parse",
+        "let's examine",
+        "let's reconstruct",
+        "we must preflight",
+        "we need to infer",
+        "we must first understand current state",
+        "understand current state",
+        "from the history",
+        "we have a long history",
+        "parse the given history",
+        "parse the history",
+        "we have acts t",
+        "we are in turn",
+        "the user is ",
+        "current phase, open motion",
+        "we need to decide what action",
+    )
+    if any(cue in s for cue in cues):
+        return True
+    if re.search(r"\bt\d+\s*:", s) and any(
+        tok in s for tok in ("nominat", "host", "history", "ballot", "speech:")
+    ):
+        return True
+    if s.count("\n") >= 3 and ("json" in s or "let's" in s or "we need" in s):
+        return True
+    return False
+
+
 def fulfill_speech(
     act: dict[str, Any],
     *,
@@ -553,6 +605,8 @@ def fulfill_speech(
     """Fill vote/nominate/party/exec when speech already announced them."""
     speech = str(act.get("speech") or "")
     if not speech:
+        return act
+    if protocol_speech(speech):
         return act
     low = speech.lower()
 
@@ -629,17 +683,31 @@ def fulfill_speech(
                 art = cited.group(1) or cited.group(2)
                 if art and int(art) >= 200:
                     act["impeach"] = art
+            elif re.search(r"\bimpeach(?:e[ds]|ing)?\b", low) and re.search(
+                r"\b(207|empty|no goal|fail(?:ing|ed)? to set|privileges|workspace)\b",
+                low,
+            ):
+                act["impeach"] = "207"
 
     if president and not act.get("executive"):
-        goal = re.search(
-            r"(?:set|enact|establish|declare)\s+(?:the\s+|a\s+|our\s+)?goal\b(?!s)\s*:?\s+(.+)",
-            speech,
-            re.I | re.S,
-        )
-        if goal:
-            text = " ".join(goal.group(1).split())[:800]
-            if text and not re.match(r"s\b", text):
-                act["executive"] = [{"type": "set_goal", "id": "speech-goal", "text": text}]
+        if not re.search(r"\bimpeach", low) and not re.search(
+            r"fail(?:ing|ed)?\s+to\s+set(?:\s+a)?\s+goal", low
+        ):
+            goal = re.search(
+                r"(?:set|enact|establish|declare)\s+goal(?:\s+|:)(?P<body>(?!s\b).+)",
+                speech,
+                re.I | re.S,
+            )
+            if goal:
+                text = " ".join(goal.group("body").split())[:800]
+                if text and not re.match(r"and\b", text, re.I):
+                    from adags.effects import complete_set_goal
+
+                    fx = complete_set_goal({"type": "set_goal", "text": text}, speech=speech)
+                    if str(fx.get("id") or "").lower() == "speech-goal":
+                        fx["id"] = "goal1"
+                    if fx.get("text"):
+                        act["executive"] = [fx]
     return act
 
 

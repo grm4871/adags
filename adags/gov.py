@@ -119,6 +119,33 @@ def party_roster(members: list[dict]) -> dict[str, list[str]]:
     return buckets
 
 
+def member_party(members: list[dict] | None, member_id: str) -> str:
+    for member in members or []:
+        if member.get("id") == member_id:
+            return str(member.get("party") or "").strip()
+    return ""
+
+
+def party_tickets(gov: dict | None) -> dict[str, str]:
+    raw = (gov or {}).get("party_tickets") or {}
+    out: dict[str, str] = {}
+    if not isinstance(raw, dict):
+        return out
+    for name, holder in raw.items():
+        party = str(name or "").strip()
+        ticket = as_member_id(holder)
+        if party and ticket:
+            out[party] = ticket
+    return out
+
+
+def format_party_tickets(gov: dict | None) -> str:
+    tickets = party_tickets(gov)
+    if not tickets:
+        return "(none)"
+    return ", ".join(f"{party}={holder}" for party, holder in sorted(tickets.items()))
+
+
 def apply_party(members: list[dict], member_id: str, party: str) -> list[dict]:
     """party '' means leave. Returns a new members list."""
     out = deepcopy(members)
@@ -240,6 +267,7 @@ def advance_phase(gov: dict, turn: int, *, motion_open: bool = False) -> dict:
     if phase == "idle":
         g["election_phase"] = "nominate"
         g["ballots"] = {}
+        g["party_tickets"] = {}
         if president_vacant(g):
             g["nominees"] = []
     elif phase == "nominate":
@@ -266,7 +294,16 @@ def consecutive_blocked(gov: dict) -> str | None:
     return president_id(gov)
 
 
-def add_nominee(gov: dict, *, member: str, platform: str, nominator: str, turn: int) -> dict | str:
+def add_nominee(
+    gov: dict,
+    *,
+    member: str,
+    platform: str,
+    nominator: str,
+    turn: int,
+    members: list[dict] | None = None,
+    caucus_primary: bool = True,
+) -> dict | str:
     g = deepcopy(gov)
     if g.get("election_phase") != "nominate":
         return "nominations are not open"
@@ -275,9 +312,23 @@ def add_nominee(gov: dict, *, member: str, platform: str, nominator: str, turn: 
     blocked = consecutive_blocked(g)
     if blocked and member == blocked:
         return f"{member} is ineligible this election (consecutive term)"
+    nom_party = member_party(members, nominator)
+    tickets = party_tickets(g)
+    remapped = False
+    if caucus_primary and nom_party and tickets.get(nom_party) and member != tickets[nom_party]:
+        member = tickets[nom_party]
+        remapped = True
+    if blocked and member == blocked:
+        return f"{member} is ineligible this election (consecutive term)"
     existing = {n["member"] for n in g.get("nominees") or []}
     if member in existing:
+        if nom_party and tickets.get(nom_party) == member:
+            return f"seconded {member} ({nom_party} ticket)"
         return "already nominated"
+    target_party = member_party(members, member)
+    if caucus_primary and nom_party and target_party == nom_party and nom_party not in tickets:
+        tickets[nom_party] = member
+    g["party_tickets"] = tickets
     g.setdefault("nominees", []).append(
         {
             "member": member,
@@ -289,8 +340,7 @@ def add_nominee(gov: dict, *, member: str, platform: str, nominator: str, turn: 
     return g
 
 
-def plurality_winner(votes: dict[str, str], nominees: list[dict]) -> str | None:
-    """votes: voter -> candidate. Earliest nomination wins a tie. None if no valid votes."""
+def election_tally(votes: dict[str, str], nominees: list[dict]) -> dict[str, int]:
     order = [n["member"] for n in nominees]
     allowed = set(order)
     tallies: dict[str, int] = {c: 0 for c in order}
@@ -298,11 +348,56 @@ def plurality_winner(votes: dict[str, str], nominees: list[dict]) -> str | None:
         pick = as_member_id(choice)
         if pick in allowed:
             tallies[pick] += 1
+    return tallies
+
+
+def format_tally(tallies: dict[str, int]) -> str:
+    bits = [f"{name} {count}" for name, count in tallies.items() if count]
+    return ", ".join(bits) or "none"
+
+
+def tied_leaders(tallies: dict[str, int]) -> list[str]:
+    if not any(tallies.values()):
+        return []
+    best = max(tallies.values())
+    return [name for name, count in tallies.items() if count == best]
+
+
+def seat_summary(votes: dict[str, str], nominees: list[dict], winner: str) -> str:
+    tallies = election_tally(votes, nominees)
+    scored = format_tally(tallies)
+    tied = tied_leaders(tallies)
+    if len(tied) > 1:
+        return f"seated {winner} ({scored}; tie → earliest nominee)"
+    return f"seated {winner} ({scored})"
+
+
+def apply_caucus_ballot(
+    voter: str,
+    pick: str,
+    members: list[dict] | None,
+    gov: dict | None,
+    *,
+    caucus_primary: bool = True,
+) -> tuple[str, str | None]:
+    """Self-votes from a caucus member become a vote for that ticket."""
+    if not caucus_primary:
+        return pick, None
+    party = member_party(members, voter)
+    ticket = party_tickets(gov).get(party)
+    if ticket and pick == voter and pick != ticket:
+        return ticket, f"ballot remapped to {ticket} ({party} ticket)"
+    return pick, None
+
+
+def plurality_winner(votes: dict[str, str], nominees: list[dict]) -> str | None:
+    """votes: voter -> candidate. Earliest nomination wins a tie. None if no valid votes."""
+    tallies = election_tally(votes, nominees)
     if not any(tallies.values()):
         return None
-    best = max(tallies.values())
-    tied = [c for c, n in tallies.items() if n == best]
-    for name in order:
+    tied = tied_leaders(tallies)
+    for nominee in nominees:
+        name = nominee["member"]
         if name in tied:
             return name
     return tied[0]
@@ -316,6 +411,8 @@ def seat_president(gov: dict, holder: str, turn: int) -> dict:
     g["election_phase"] = "idle"
     g["nominees"] = []
     g["ballots"] = {}
+    g["party_tickets"] = {}
+    g["policy_due"] = True
     return g
 
 
@@ -327,4 +424,5 @@ def vacate_president(gov: dict) -> dict:
     g["election_phase"] = "nominate"
     g["nominees"] = []
     g["ballots"] = {}
+    g["party_tickets"] = {}
     return g

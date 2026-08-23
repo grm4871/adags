@@ -435,15 +435,23 @@ def act_marks(
         marks.append(f"{vm} on the motion")
     if act.get("executive"):
         marks.append("executive")
+    raw_w = act.get("whisper")
+    if isinstance(raw_w, dict):
+        who = as_member_id(raw_w.get("to") or raw_w.get("member"))
+        if who:
+            marks.append(f"whispers {who}")
+    elif isinstance(raw_w, str) and raw_w.strip() and raw_w.strip().lower() not in {"null", "none"}:
+        marks.append("whispers")
     return marks
 
 
 def paint_mark(mark: str, *, parties: dict[str, str] | None = None) -> str:
     if mark.startswith("joins "):
         return f"joins {paint_party(mark[6:])}"
-    if mark.startswith("nominates ") or mark.startswith("votes "):
+    if mark.startswith("nominates ") or mark.startswith("votes ") or mark.startswith("whispers "):
         verb, _, who = mark.partition(" ")
-        return f"{c('36', verb)} {paint_citizen(who, (parties or {}).get(who))}"
+        color = "35" if verb == "whispers" else "36"
+        return f"{c(color, verb)} {paint_citizen(who, (parties or {}).get(who))}"
     if mark.startswith("aye"):
         return c("32", mark)
     if (
@@ -559,6 +567,12 @@ def turn_open(
     roster = party_roster(members or [])
     if roster:
         for line in wrap_field("parties", format_roster(roster), atom="; "):
+            emit(line)
+    from adags.gov import format_party_tickets
+
+    tickets = format_party_tickets(gov)
+    if tickets != "(none)":
+        for line in wrap_field("tickets", tickets):
             emit(line)
     noms = gov.get("nominees") or []
     if noms:
@@ -700,6 +714,11 @@ def status_block(state: RunState) -> str:
     roster = party_roster(members)
     if roster:
         lines.extend(wrap_field("parties", format_roster(roster), atom="; "))
+    from adags.gov import format_party_tickets
+
+    tickets = format_party_tickets(gov)
+    if tickets != "(none)":
+        lines.extend(wrap_field("tickets", tickets))
     if goals:
         for gid, text in goals.items():
             lines.extend(wrap_field(str(gid), text))

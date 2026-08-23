@@ -9,6 +9,7 @@ from typing import Any
 
 from adags.gov import as_impeach, as_member_id
 from adags.render import as_ballot, collapse_ws
+from adags.llm import protocol_speech
 
 PREAMBLE = (
     "Your own acts and what the host did with them, oldest first. "
@@ -51,7 +52,7 @@ def append_record(root: Path, member_id: str, record: dict[str, Any]) -> None:
 def record_from_act(turn: int, act: dict[str, Any]) -> dict[str, Any]:
     rec: dict[str, Any] = {"turn": int(turn)}
     speech = collapse_ws(str(act.get("speech") or ""))
-    if speech and not speech.startswith("("):
+    if speech and not speech.startswith("(") and not protocol_speech(speech):
         rec["speech"] = speech[:200]
     nom = act.get("nominate")
     if isinstance(nom, dict):
@@ -77,6 +78,11 @@ def record_from_act(turn: int, act: dict[str, Any]) -> dict[str, Any]:
     ballot = as_ballot(act.get("vote_motion"))
     if ballot:
         rec["motion"] = ballot
+    whisper = act.get("whisper")
+    if isinstance(whisper, dict):
+        who = as_member_id(whisper.get("to") or whisper.get("member"))
+        if who:
+            rec["whisper"] = who
     if act.get("party") is not None:
         from adags.gov import as_party_id
 
@@ -91,7 +97,7 @@ def record_from_act(turn: int, act: dict[str, Any]) -> dict[str, Any]:
     for fx in coerce_effects(act.get("executive")):
         if isinstance(fx, dict) and fx.get("type"):
             kinds.append(str(fx["type"]))
-    for key in ("set_goal", "write_workspace"):
+    for key in ("set_goal", "write_workspace", "edit_policy"):
         if act.get(key) is not None:
             kinds.append(key)
     if kinds:
@@ -117,15 +123,14 @@ def format_record(record: dict[str, Any]) -> str:
         bits.append(record["motion"])
     if record.get("exec"):
         bits.append("exec " + ",".join(record["exec"]))
+    if record.get("whisper"):
+        bits.append("whisper " + str(record["whisper"]))
     if record.get("party"):
         bits.append("party " + str(record["party"]))
     if record.get("scratch"):
         bits.append("scratch " + collapse_ws(str(record["scratch"]))[:120])
     if record.get("host"):
         bits.append("host " + collapse_ws(str(record["host"]))[:180])
-    speech = collapse_ws(str(record.get("speech") or ""))
-    if speech:
-        bits.append(speech[:160])
     if len(bits) == 1:
         bits.append("present")
     return " · ".join(bits)
@@ -138,8 +143,23 @@ def history_prefix(records: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def compose_user(records: list[dict[str, Any]], snapshot: str) -> str:
-    return history_prefix(records) + "\n\n## This turn\n" + snapshot.rstrip() + "\n"
+def compose_user(
+    records: list[dict[str, Any]],
+    snapshot: str,
+    *,
+    keep: int = 12,
+) -> str:
+    """THIS TURN last. Keep only recent acts so the model does not reenact t1."""
+    if keep and len(records) > keep:
+        omitted = len(records) - keep
+        head = (
+            PREAMBLE
+            + f"\n({omitted} earlier acts omitted.)\n"
+            + "\n".join(format_record(r) for r in records[-keep:])
+        )
+    else:
+        head = history_prefix(records)
+    return head + "\n\n## This turn\n" + snapshot.rstrip() + "\n"
 
 
 def patch_last_record(root: Path, member_id: str, turn: int, **fields: Any) -> None:
@@ -249,6 +269,7 @@ def goal_clock(
         baseline = ((meta.get(gid) or {}) if isinstance(meta.get(gid), dict) else {})
         baseline = baseline.get("baseline") if isinstance(baseline, dict) else None
         cites = 0
+        counted: list[str] = []
         for path in files:
             try:
                 body = path.read_text(encoding="utf-8", errors="replace")
@@ -259,8 +280,13 @@ def goal_clock(
                 continue
             if _file_cites_goal(body, rel, gid, text):
                 cites += 1
+                counted.append(rel)
         due = goal_until(text)
-        if cites >= need:
+        from adags.effects import goal_looks_like_fragment
+
+        if goal_looks_like_fragment(gid, text):
+            state = "invalid"
+        elif cites >= need:
             state = "complete"
         elif due is not None and int(turn) >= due:
             state = "overdue"
@@ -270,7 +296,10 @@ def goal_clock(
             clock = "no clock"
         else:
             clock = f"due turn {due}"
-        bits.append(f"{gid} {state} {min(cites, need)}/{need} files, {clock}")
+        line = f"{gid} {state} {min(cites, need)}/{need} files, {clock}"
+        if counted:
+            line += f" (names {gid}: {', '.join(counted[:need])})"
+        bits.append(line)
     return "; ".join(bits)
 
 

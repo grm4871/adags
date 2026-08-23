@@ -75,7 +75,11 @@ def default_gov() -> dict:
         "election_enabled": True,
         "max_members": None,
         "election_phase": "nominate",
+        "election_quorum": "majority",
+        "caucus_primary": True,
         "nominees": [],
+        "ballots": {},
+        "party_tickets": {},
         "offices": {
             "president": {
                 "holder": None,

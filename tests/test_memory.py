@@ -41,6 +41,7 @@ def test_record_from_act_skips_protocol_and_objects():
     line = format_record(rec)
     assert "voted builder" in line
     assert "nominated builder" in line
+    assert "I vote aye" not in line
 
     shaped = record_from_act(
         26,
@@ -65,6 +66,18 @@ def test_compose_puts_snapshot_last_and_roundtrips(tmp_path):
     assert user.strip().endswith("Turn 33. phase ballot.")
     assert "t10 · voted continuity" in user
     assert "t18 · exec set_goal" in user
+
+
+def test_compose_user_omits_old_acts(tmp_path):
+    for i in range(1, 16):
+        append_record(tmp_path, "builder", {"turn": i, "vote": "builder"})
+    recs = load_records(tmp_path, "builder")
+    user = compose_user(recs, "Turn 16.")
+    assert "earlier acts omitted" in user
+    assert "t1 · voted builder" not in user
+    assert "t3 · voted builder" not in user
+    assert "t4 · voted builder" in user
+    assert "t15 · voted builder" in user
 
 
 def test_patch_last_record_keeps_prior_bytes(tmp_path):
@@ -104,13 +117,27 @@ def test_clerk_brief_every_fourth_turn_and_card_uses_exact_speech_once(tmp_path)
             return tmp_path / name
 
     (tmp_path / "journal.md").write_text(journal, encoding="utf-8")
+    seen: list[str] = []
+
+    def runner(user: str) -> str:
+        seen.append(user)
+        return "Ambition sat. The 316 clone died as already-law. Ten goals remain."
+
     text = maybe_clerk_brief(
         Fake(),
         turn=4,
         mechanical="raw",
-        runner=lambda _user: "Ambition sat. The 316 clone died as already-law. Ten goals remain.",
+        runner=runner,
     )
     assert text and "already-law" in text
+    assert seen and seen[0].startswith("FACTS:")
+    assert "THIS TURN:" in seen[0]
+    mixed = (
+        "## Turn 3\n\n# Clerk brief (turns 1–3)\n\nNo election occurred.\n\n---\n\n"
+        "# Turn 3 digest\nPresident: minority\nElection votes: seated minority\n"
+    )
+    assert "No election occurred" not in recent_journal(mixed, turns=2)
+    assert "seated minority" in recent_journal(mixed, turns=2)
     digest = (
         "# Clerk brief (turns 1–4)\n\nOffice changed hands.\n\n---\n\n"
         "# Turn 4 digest\n\n## Speech\n**builder:** recap\n**ambition:** dissent\n\n"
@@ -159,6 +186,14 @@ def test_goal_clock_counts_files_and_due_date(tmp_path):
         turn=8,
     )
     assert "g2 overdue 0/3 files, due turn 4" in emptyish
+    junk = goal_clock(
+        {
+            "speech-goal": "and write a workspace as required by offices.president.privileges (host article 207)."
+        },
+        tmp_path,
+        turn=8,
+    )
+    assert "speech-goal invalid" in junk
 
 
 def test_goal_clock_ignores_old_slogan_files(tmp_path):

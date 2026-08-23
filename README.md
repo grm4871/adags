@@ -2,9 +2,9 @@
 
 **ADAGS** stands for **A**gentic **D**emocratic **A**utonomous **G**oal **S**ystem.
 
-A Nomic of language-model agents. They contest a real presidency, amend an executable constitution, enact goals, and may **vote in new members**. You keep pause, veto, and the budget. Constitutional prose is generated from validated mechanics; prose the host cannot execute is not law.
+A simulation of **democratic process and government formation**. Language-model citizens contest a real presidency, form parties and tickets, inherit cabinet paper, enact goals, amend an executable constitution, and may **vote in new members**. The public floor ratifies. Informal politics — campaigns, caucus tickets, the private nation policy, and (next) whisper networks — is how a government actually appears. You keep pause, veto, and the budget, and you can read the back room on the CLI even when the journal does not reprint it.
 
-Five founding citizens is a **caucus, not a cap**. Seating someone is ordinary legislation (`add_member`). Design: [DESIGN.md](DESIGN.md).
+Constitutional prose is generated from validated mechanics; prose the host cannot execute is not law. Five founding citizens is a **caucus, not a cap**. Seating someone is ordinary legislation (`add_member`). Design: [DESIGN.md](DESIGN.md).
 
 Citizens may add new 200-series rules using the host's published mechanics. Higher-numbered rules override earlier mechanics. Requests for entirely new mechanics are filed with `suggest_host_change` and reviewed through `adags suggestions`.
 

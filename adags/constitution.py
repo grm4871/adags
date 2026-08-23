@@ -39,16 +39,20 @@ DEFAULT_RULES = {
     "206": {"text": "Interior rules may be amended only with executable mechanics accepted by the host.", "mechanics": {}},
     "207": {
         "text": (
-            "The President alone may write the workspace as an executive act. "
+            "The President alone may write the workspace and edit the private "
+            "nation policy as executive acts. "
             "The floor may set and repeal goals by motion. "
             "A published override threshold may let the floor write the workspace by motion."
         ),
-        "mechanics": {"offices.president.privileges": ["write_workspace", "set_goal"]},
+        "mechanics": {
+            "offices.president.privileges": ["write_workspace", "set_goal", "edit_policy"]
+        },
     },
     "208": {
         "text": (
             "The President is elected by plurality for eight turns and may not "
-            "succeed themselves; earliest nomination breaks ties."
+            "succeed themselves; a majority of seated members must cast a valid "
+            "ballot before anyone is seated; earliest nomination breaks ties."
         ),
         "mechanics": {
             "election.enabled": True,
@@ -66,15 +70,33 @@ DEFAULT_RULES = {
     "210": {
         "text": (
             "Any seated member may be nominated, including themselves, except the "
-            "sitting President, who may not seek a consecutive term."
+            "sitting President, who may not seek a consecutive term. "
+            "The first same-party nomination locks that caucus ticket; later "
+            "same-party nominations second it. A member bolts by leaving the party "
+            "this turn, then nominating or voting separately."
         ),
-        "mechanics": {},
+        "mechanics": {"election.caucus_primary": True},
     },
     "211": {
         "text": "Membership is open unless the polity enacts a numerical cap.",
         "mechanics": {"membership.max_members": None},
     },
     "212": {"text": "At founding the presidency is vacant and the first business is an election.", "mechanics": {}},
+    "213": {
+        "text": (
+            "The nation keeps a treasury. Each seated member costs upkeep per turn; "
+            "a completed goal pays its yield once; an empty goal register drains "
+            "credits. While insolvent, add_member is refused."
+        ),
+        "mechanics": {
+            "economy.enabled": True,
+            "economy.seed": 24,
+            "economy.member_upkeep": 1,
+            "economy.goal_complete_yield": 8,
+            "economy.complete_dividend": 1,
+            "economy.empty_register_drain": 2,
+        },
+    },
 }
 
 MECHANIC_SPECS: dict[str, tuple[type | tuple[type, ...], Any]] = {
@@ -89,10 +111,17 @@ MECHANIC_SPECS: dict[str, tuple[type | tuple[type, ...], Any]] = {
     "election.quorum": (str, {"majority", "two_thirds", "unanimous"}),
     "election.term_length": (int, range(1, 101)),
     "election.consecutive_limit": ((int, type(None)), range(0, 11)),
+    "election.caucus_primary": (bool, None),
     "goals.max_live": ((int, type(None)), range(1, 21)),
     "impeachment.enabled": (bool, None),
     "impeachment.threshold": (str, {"majority", "two_thirds", "unanimous"}),
     "membership.max_members": ((int, type(None)), None),
+    "economy.enabled": (bool, None),
+    "economy.seed": (int, range(0, 10000)),
+    "economy.member_upkeep": (int, range(0, 101)),
+    "economy.goal_complete_yield": (int, range(0, 10001)),
+    "economy.complete_dividend": (int, range(0, 101)),
+    "economy.empty_register_drain": (int, range(0, 101)),
     "offices.president.privileges": (list, None),
     "offices.president.override": ((str, type(None)), {"majority", "two_thirds", "unanimous"}),
 }
@@ -118,11 +147,13 @@ DEFAULT_CHARTER = {
     "301": {
         "text": (
             "This is a digital nation of language-model constituents. "
-            "The chamber's charge is to govern and grow it: contest office, "
-            "keep a goal the next President can fail, file proof of work, "
-            "and seat another member when the work needs another voice. "
-            "Members enforce this series by speech, vote, impeachment, and office. "
-            "The host does not execute these articles."
+            "The chamber's charge is to form a government and keep it: "
+            "contest office, found parties and tickets, keep a goal the next "
+            "President can fail, file proof of work, and seat another member "
+            "when the work needs another voice. Campaigns, caucus discipline, "
+            "inherited office briefs, and deals off the floor are part of that "
+            "charge. Members enforce this series by speech, vote, impeachment, "
+            "and office. The host does not execute these articles."
         )
     }
 }
@@ -200,6 +231,23 @@ def mechanics(law: dict) -> dict[str, Any]:
     return out
 
 
+def set_mechanic(law: dict, path: str, val: Any) -> dict:
+    """Set one published mechanic on the rule that owns it (lowest number wins
+    only if no rule carries it yet). Returns the mutated law dict."""
+    rules = law.get("rules") or {}
+    for rid in sorted(rules, key=int):
+        mech = rules[rid].get("mechanics") or {}
+        if path in mech:
+            mech[path] = val
+            return law
+    # No owner: attach to the first interior rule that has any mechanics.
+    for rid in sorted(rules, key=int):
+        if rules[rid].get("mechanics"):
+            rules[rid]["mechanics"][path] = val
+            return law
+    return law
+
+
 def value(law: dict, path: str, default: Any = None) -> Any:
     return mechanics(law).get(path, default)
 
@@ -213,6 +261,8 @@ def apply_to_runtime(gov: dict, law: dict) -> dict:
     out["consecutive_limit"] = value(law, "election.consecutive_limit", 1)
     out["impeach_threshold"] = value(law, "impeachment.threshold", "majority")
     out["election_enabled"] = value(law, "election.enabled", True)
+    out["election_quorum"] = value(law, "election.quorum", "majority")
+    out["caucus_primary"] = value(law, "election.caucus_primary", True)
     out["max_members"] = value(law, "membership.max_members")
     return out
 
@@ -264,7 +314,7 @@ def validate_patch(patch: dict) -> str | None:
             return "membership.max_members must be null or >= 1"
         if path == "offices.president.privileges" and (
             not all(isinstance(x, str) for x in val)
-            or any(x not in {"write_workspace", "set_goal"} for x in val)
+            or any(x not in {"write_workspace", "set_goal", "edit_policy"} for x in val)
         ):
             return "unsupported presidential privilege"
         if allowed is not None and val is not None and val not in allowed:
